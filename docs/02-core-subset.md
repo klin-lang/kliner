@@ -16,7 +16,10 @@ types), `stdlib/`, `test/`, `examples/`. Every "bootstrap risk" below
 marked *probed* was checked on 2026-10-23 by compiling a small program
 with that Klin (Dart 3.13.7 → C → gcc).
 
-Status of every section: **PROPOSED** until Marek confirms.
+Status: C1–C4 and C6 **PROPOSED**. The five stage-1 questions are
+**DECIDED (2026-10-23)** — see [C7](#c7-decisions--decided-2026-10-23).
+Items marked *pending in klin-lang/klin* are changes to Klin that the
+compiler source relies on; until they land, the listed workaround applies.
 
 ---
 
@@ -52,26 +55,30 @@ and probed OK.
 | `let` / `let mut` / `:=` | | low | ZII: zeroed when no initializer (D6) |
 | Control flow | `if` / `else if` / `while` / `for i in a..<b` / C-style `for` / `break` / `continue` / `return` | low | |
 | `match` on integers and enums | value groups, `a..=b`, relational arms, `when`, `else` | low | Lexer/parser dispatch. Probed: `match c { 48..=57 {…} 32, 10 {…} else {…} }` |
-| `enum` (named integer) | `enum Tok: u8 { … }`, `Tok.Ident`, `cast(u8, Tok.Ident)` | **high** as a field type | *Probed:* `struct T { k: Tok }` → `unknown type 'Tok'`. Locals/params/returns work. Workaround: store `u8` field + `cast`. Fix in Klin preferred (G2) |
+| `enum` (named integer) | `enum Tok: u8 { … }`, `Tok.Ident`, `cast(u8, Tok.Ident)` | **high** as a field type | *Probed:* `struct T { k: Tok }` → `unknown type 'Tok'`. Locals/params/returns work. Fix *pending in klin-lang/klin* (G2); until then `u8` field + `cast` |
 | `struct` + methods | `fn (v: T) f()`, `fn (mut v: T) f()`, `Type.fn` | low | Nested structs and `[N]T` fields probed OK |
 | Fixed arrays | `[N]T`, `xs[i]`, `xs.len`, `[N]Struct` | low | Arrays of structs probed OK |
-| Slices of primitives | `[]u8`, `[]i32`, `[]i64`, `xs[:]`, `xs.len` | medium | Params and fields OK. *Probed:* `let s = xs[:]; s[0] = 7` → broken C (G4). Pass `xs[:]` directly |
-| Pointers | `*T` / `*mut T`, `&x`, `*p`, `(*p).f` | **high** for self-reference | *Probed:* `struct Node { next: *mut Node }` → broken C (anonymous `typedef struct`). Pointers to other structs OK (G1) |
+| Slices of primitives | `[]u8`, `[]i32`, `[]i64`, `xs[:]`, `xs.len` | medium | Params and fields OK. *Probed:* `let s = xs[:]; s[0] = 7` → broken C (G4). Fix *pending in klin-lang/klin*; until then pass `xs[:]` directly |
+| Pointers | `*T` / `*mut T`, `&x`, `*p`, `(*p).f` | **high** for self-reference | *Probed:* `struct Node { next: *mut Node }` → broken C (anonymous `typedef struct`). Pointers to other structs OK. Fix *pending in klin-lang/klin* (G1) |
 | `!T` errors | `!T`, `error(n)`, `expr!`, `or { }`, `err` | low | `!Struct` probed OK. Errno maps 1:1 to `error(n)` (C5) |
 | `defer` | block-scoped, LIFO | low | Covered by Klin goldens (`defer_*`) |
 | Modules | `module`, `import`, `import path alias`, `pub` | low | Search paths `-I` are used for target selection (C5) |
 | `$fn` generics | `$fn vec(name: str, T: type) { … }`, `$vec("VecI32", i32)` | medium | Probed OK. Risk: error messages inside expansions. Use only for a few container shapes |
 | Function pointers | `fn(T): R`, no capture | low/medium | *Probed:* `h.cb(1)` on a field parses as a method → bind first: `let f = h.cb; f(1)` (G7) |
 | Destructuring / multi-assign | `let { x, y } = p`, `a, b = b, a` | low | Optional; lowers to plain moves |
-| Strings for the compiler | `[]u8` + `i32` offsets | see G5 | All source text, identifiers and output buffers are `[]u8`. `str` is only for literals passed to `out` |
+| Byte-string literal | `b"fn"` of type `[]u8` | **high** until it lands | *Pending in klin-lang/klin* (G5). Keyword table, messages, paths: `b"fn"`, `b"error: "` |
+| Module-level `const` | `const PAGE: i64 = 4096` | **high** until it lands | *Pending in klin-lang/klin* (G8). Immutable only — no mutable globals |
+| Strings for the compiler | `[]u8` + `i32` offsets | low | All source text, identifiers and output buffers are `[]u8`; literals are `b"…"`. `str` is not used in compiler code |
 
 ### Data model this forces
 
 Klin has no tagged unions (payload enums are "not in the language",
 `syntax.md`), self-referential pointers do not build (G1) and slices of
-structs are rejected (G3). That points to one model, which is also the
-fastest and simplest:
+structs are rejected (G3). G1 is being fixed in Klin, but the table
+model stays the choice — it is also the fastest and simplest:
 
+- **Compiler state in one context struct** passed as `*mut Ctx` — no
+  mutable globals (C7.3). Fixed values are module-level `const`.
 - **Tables, not trees of pointers.** Tokens, AST nodes, types, IR ops
   live in arrays; references are `i32` indices.
 - A node = `kind: u8` + a few `i32` fields (`a`, `b`, `c`, `extra`).
@@ -121,26 +128,27 @@ Kliner reports a clear error, e.g.
 ## C5. Gaps in current Klin found by probes
 
 These matter because the compiler source must build with current Klin.
-For each: workaround in Kliner source **or** fix in Klin (preferred when
-it is a bug).
+G1, G2, G4, G5 (`b"…"`) and G8 (`const`) are **pending in klin-lang/klin**
+(decided 2026-10-23, handed to Klin maintainers). The others use the
+workaround.
 
 | # | Probe | Result | Workaround | Fix in Klin? |
 |---|---|---|---|---|
-| G1 | `struct Node { next: *mut Node }` | C error: incompatible pointer type (anonymous typedef) | Index-based tables (C2) | Yes — bug, small (named struct tag) |
-| G2 | `struct T { k: Tok }` (enum field) | `unknown type 'Tok'` | `k: u8` + `cast` | Yes — bug |
+| G1 | `struct Node { next: *mut Node }` | C error: incompatible pointer type (anonymous typedef) | Index-based tables (C2) | **Pending in klin-lang/klin** — bug, small (named struct tag) |
+| G2 | `struct T { k: Tok }` (enum field) | `unknown type 'Tok'` | `k: u8` + `cast` until fixed | **Pending in klin-lang/klin** — bug |
 | G3 | `[]Token` (slice of struct), `fn main(args: []str)` | `slice requires a primitive element type` | Struct-of-arrays, `[N]Struct` | Yes — feature, medium |
-| G4 | `let s = xs[:]; s[0] = 7` | C error: `request for member 'ptr'` | Pass `xs[:]` directly | Yes — bug |
-| G5 | `take("abc")` where `take(s: []u8)`; `"abc".len` | `str` is a C string pointer: not `[]u8`, no `.len`, no indexing | Keyword table as `[N]u8` literals; or G5 fix | Yes — needs a decision: `str` → `[]u8` view (e.g. `"fn".bytes()` or `b"fn"`) |
+| G4 | `let s = xs[:]; s[0] = 7` | C error: `request for member 'ptr'` | Pass `xs[:]` directly until fixed | **Pending in klin-lang/klin** — bug |
+| G5 | `take("abc")` where `take(s: []u8)`; `"abc".len` | `str` is a C string pointer: not `[]u8`, no `.len`, no indexing | — | **Pending in klin-lang/klin:** byte-string literal `b"fn"` of type `[]u8` |
 | G6 | `xs[1:3]` | parse error — only `xs[:]` exists | `(slice, start, len)` triples | Yes — feature, small |
 | G7 | `h.cb(1)` on an `fn` field | parsed as method call | `let f = h.cb; f(1)` | Optional |
-| G8 | top-level `let N: i32 = 3` | parse error — no globals / consts | Context struct passed as `*mut`; consts as `enum` values or `fn` | Later — globals affect K2 design |
+| G8 | top-level `let N: i32 = 3` | parse error — no globals / consts | Context struct passed as `*mut Ctx` (state); `const` (values) | **Pending in klin-lang/klin:** module-level `const` only; mutable globals stay out |
 | G9 | `cast(usize, &x)` (pointer → integer) | `numeric cast requires an integer or float`. Integer → pointer works | Not needed in the compiler; runtime only (intrinsic) | Optional |
-| G10 | no `argc` / `argv` in Klin | `main()` takes no arguments | Read `/proc/self/cmdline` (C6) | Optional |
+| G10 | no `argc` / `argv` in Klin | `main()` takes no arguments | Read `/proc/self/cmdline` (C6) — decided for v0 | Not needed |
 | — | `[65, 66]` as `[2]u8` initializer | literals typed as `[2]i32` | `cast(u8, 65)` per element or char literals | Optional |
 
-Recommendation: fix **G1, G2, G4** in Klin before stage 2 (bugs, small),
-and decide **G5** (`str` vs `[]u8`) — it decides how the lexer, keyword
-table and error messages are written. The rest have acceptable workarounds.
+G1, G2, G4, `b"…"` and `const` should land in Klin before stage 2 starts
+— the frontend is written against them. G3, G6, G7, G9 keep their
+workarounds.
 
 ---
 
@@ -164,7 +172,8 @@ rt/
   linux_arm64/sys.kl    module sys     later (generic numbers)
   linux_rv64/sys.kl     module sys     later (generic numbers)
   bootstrap/sys.kl      module sys     Klin only: same API over libc (`@[cimport]` + small shim)
-  bootstrap/shim.c      klrt_syscall6, klrt_slice_u8 … (linked by `@[link]`, bootstrap only)
+  bootstrap/shim.c      klrt_syscall6, klrt_slice_u8 … (linked by `@[link]`, bootstrap only;
+                        may depend on Klin's C layout of []T — decided, C7.5)
 ```
 
 ```sh
@@ -193,29 +202,26 @@ module sys
 // Bootstrap: shim around libc syscall(2).
 pub fn call6(nr: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64): i64
 
-// Syscall numbers for this target, as associated functions (no globals, G8).
-pub fn Nr.read(): i64            // x86-64: 0
-pub fn Nr.write(): i64           // 1
-pub fn Nr.openat(): i64          // 257
-pub fn Nr.close(): i64           // 3
-pub fn Nr.lseek(): i64           // 8
-pub fn Nr.fstat(): i64           // 5
-pub fn Nr.mmap(): i64            // 9
-pub fn Nr.munmap(): i64          // 11
-pub fn Nr.exit_group(): i64      // 231
+// Syscall numbers for this target (module-level `const`, G8).
+pub const NR_READ: i64 = 0
+pub const NR_WRITE: i64 = 1
+pub const NR_OPENAT: i64 = 257
+pub const NR_CLOSE: i64 = 3
+pub const NR_LSEEK: i64 = 8
+pub const NR_FSTAT: i64 = 5
+pub const NR_MMAP: i64 = 9
+pub const NR_MUNMAP: i64 = 11
+pub const NR_EXIT_GROUP: i64 = 231
 
 // Raw memory → slice. Kliner: intrinsic. Bootstrap: shim.
 pub fn slice_u8(addr: i64, len: i64): []u8
 pub fn slice_i32(addr: i64, len: i64): []i32
 pub fn slice_i64(addr: i64, len: i64): []i64
-
-// C string literal → bytes (until G5 is decided). Kliner: intrinsic.
-pub fn str_bytes(s: str): []u8
 ```
 
-(The `Nr.*` functions need a `struct Nr {}` or `enum Nr` to hang on;
-an `enum Nr: i64 { … }` with explicit values is the alternative — same
-emission, but values differ per target, so it lives in `sys` either way.)
+Flag constants (`AT_FDCWD`, `O_*`, `SEEK_*`, `PROT_*`, `MAP_*`) are
+`const` too. They are the same on all three targets, so they live in the
+portable `os` module; only `NR_*` differ per target.
 
 ### Syscall numbers
 
@@ -247,7 +253,7 @@ Calling convention of the `syscall` instruction:
 | ARM64 (`svc #0`) | `x8` | `x0`–`x5` | `x0` | — |
 | RV64 (`ecall`) | `a7` | `a0`–`a5` | `a0` | — |
 
-Constants (same on all three targets for what we use):
+Constants — `const` in `os` (same on all three targets for what we use):
 `AT_FDCWD = -100`, `O_RDONLY = 0`, `O_WRONLY = 1`, `O_RDWR = 2`,
 `O_CREAT = 0o100`, `O_TRUNC = 0o1000`, `SEEK_SET = 0`, `SEEK_END = 2`,
 `PROT_READ = 1`, `PROT_WRITE = 2`, `MAP_PRIVATE = 2`, `MAP_ANONYMOUS = 0x20`.
@@ -263,8 +269,8 @@ Not Klin source. A few instructions generated per target:
   then `exit_group(0)` (or `main`'s value once `main` may return `i32`).
 - ARM64 / RV64: same layout at `sp`; `bl main` / `call main`.
 
-Because Klin has no globals (G8) and `main()` takes no arguments (G10),
-v0 reads arguments from **`/proc/self/cmdline`** (NUL-separated) in
+Because there are no mutable globals (C7.3) and `main()` takes no
+arguments (G10), v0 reads arguments from **`/proc/self/cmdline`** (NUL-separated) in
 `os.args` — identical in both stages, no backend magic. Later, `_start`
 saves `argc`/`argv` in a backend-owned slot and `os.args` reads it via
 an intrinsic (no `/proc` dependency).
@@ -355,7 +361,7 @@ pub struct Out {
 pub fn Out.stdout(): Out
 pub fn Out.stderr(): Out
 pub fn (mut o: Out) bytes(b: []u8, off: i32, n: i32)
-pub fn (mut o: Out) lit(s: str)              // literal; via sys.str_bytes until G5
+pub fn (mut o: Out) lit(b: []u8)             // whole slice, e.g. o.lit(b"error: ")
 pub fn (mut o: Out) dec(v: i64)
 pub fn (mut o: Out) hex(v: u64)
 pub fn (mut o: Out) nl()
@@ -373,21 +379,56 @@ The complete list of things the core cannot express (stage 4):
 |---|---|
 | `sys.call6` | `syscall` (x86-64), `svc #0` (ARM64), `ecall` (RV64) |
 | `sys.slice_u8/i32/i64(addr, len)` | build `{ptr, len}` — no code |
-| `sys.str_bytes(s)` | `{ptr, len}` from the literal (length known at compile time) |
 | `_start` | emitted, not declared |
 
 Everything else in `rt/` is plain core Klin.
 
 ---
 
-## C7. Open questions
+## C7. Decisions — DECIDED (2026-10-23)
 
-1. **G5:** should Klin get a `str` → `[]u8` view (`"fn".bytes()` or
-   `b"fn"`)? It decides how the lexer and keyword table are written.
-2. Fix **G1 / G2 / G4** in Klin first (small bugs), or work around them in
-   Kliner source?
-3. **Globals (G8):** stay without them (context struct), or add `const`
-   to Klin and the core? Constants per target would be cleaner as `const`.
-4. **Arguments:** `/proc/self/cmdline` for v0 — acceptable?
-5. **Shim:** `rt/bootstrap/shim.c` depends on Klin's C layout of `[]T`
-   (as `stdlib/mem` already does). Acceptable for bootstrap only?
+The open questions of this stage, answered by Marek.
+
+1. **Bytes from literals (G5):** Klin gets a byte-string literal
+   **`b"fn"` of type `[]u8`**. Compiler code uses `b"…"` for keywords,
+   messages and paths; `str` is not used there. *Pending in klin-lang/klin.*
+2. **G1 / G2 / G4 are fixed in Klin itself**, not worked around in Kliner
+   source. Handed to Klin maintainers. *Pending in klin-lang/klin.*
+3. **Module-level `const`** is added to Klin (`pub const PAGE: i64 = 4096`).
+   Compiler state lives in a **context struct** passed as `*mut Ctx`;
+   **no mutable globals**. *Pending in klin-lang/klin.*
+4. **Arguments in v0** come from `/proc/self/cmdline`. OK.
+5. **The bootstrap C shim** (`rt/bootstrap/shim.c`) may depend on Klin's
+   internal C layout of `[]T`. OK — bootstrap only.
+
+Example with the decided forms:
+
+```klin
+module os
+import sys
+
+pub const AT_FDCWD: i64 = -100
+pub const O_RDONLY: i64 = 0
+
+pub fn args(a: *mut arena.Arena): !Args {
+    let fd = open_read(b"/proc/self/cmdline\0")!
+    defer close_quiet(fd)          // close, ignore error
+    …
+}
+```
+
+```klin
+struct Ctx {
+    arena: arena.Arena
+    err: out.Out
+    src: []u8
+    tok_kind: []u8
+    tok_start: []i32
+}
+
+fn report(c: *mut Ctx, pos: i32) {
+    (*c).err.lit(b"error: unexpected token at ")
+    (*c).err.dec(cast(i64, pos))
+    (*c).err.nl()
+}
+```
