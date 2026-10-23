@@ -18,6 +18,9 @@ with that Klin (Dart 3.13.7 → C → gcc).
 
 Status: C1–C4 and C6 **PROPOSED**. The five stage-1 questions are
 **DECIDED (2026-10-23)** — see [C7](#c7-decisions--decided-2026-10-23).
+Four review questions (read-only bytes, literal range, literal typing,
+runtime API) are **DECIDED (2026-10-23)** — see
+[C8](#c8-review-decisions--decided-2026-10-23).
 Items marked *in klin PR #351 (not merged)* are changes to Klin that the
 compiler source relies on. They are implemented in
 [klin-lang/klin#351](https://github.com/klin-lang/klin/pull/351) (branch
@@ -51,7 +54,7 @@ and probed OK.
 
 | Feature | Klin form | Bootstrap risk | Notes |
 |---|---|---|---|
-| Integers | `i8`…`i64`, `u8`…`u64`, `usize`/`isize`, `int` = `i32` | low | Widths matter (K8). `u64` literals and shifts probed OK. *Probed:* a bare literal adapts to the expected type (`f(0)` for an `i64` param), but `-1`, `~7` and `1 << 40` are `i32` expressions → `cast(i64, -1)`, `cast(i64, 1) << 40`. `xs.len` is `i32` |
+| Integers | `i8`…`i64`, `u8`…`u64`, `usize`/`isize`, `int` = `i32` | low | Widths matter (K8). `u64` literals and shifts probed OK. *Probed:* a bare literal adapts to the expected type (`f(0)` for an `i64` param), but `-1`, `~7` and `1 << 40` are `i32` expressions → `cast(i64, -1)`, `cast(i64, 1) << 40`. `xs.len` is `i32`. **DECIDED (C8.2, C8.3), pending in Klin:** unary `-` / `~` on a literal take the expected type; an out-of-range literal in `const` / `let` is a compile error. Examples keep `cast(i64, -1)` until that lands |
 | `bool` | `true` / `false`; `if` wants `bool` | low | No numeric truthiness |
 | Literals | `0xFF`, `0b1010`, `0o755`, `1_000`, `'A'` | low | Char literal is an integer — the lexer lives on these |
 | Numeric `cast` | `cast(i64, x)`, `cast(u8, 300)` | low | No implicit widen/narrow — good for IR widths |
@@ -70,7 +73,7 @@ and probed OK.
 | `$fn` generics | `$fn vec(name: name, T: type) { struct $name { data: [8]$T … } }`, `$vec(VecI32, i32)` | medium | Probed OK. Parameters are spliced with `$` (`$T`, `$name`). A free `fn` inside the body is declared once per expansion → `redeclaration of function` on the second `$vec(…)`; use methods on `$name`. Risk: error messages inside expansions. Use only for a few container shapes |
 | Function pointers | `fn(T): R`, no capture | low/medium | *Probed:* `h.cb(1)` on a field parses as a method → bind first: `let f = h.cb; f(1)` (G7) |
 | Destructuring / multi-assign | `let { x, y } = p`, `a, b = b, a` | low | Optional; lowers to plain moves |
-| Byte-string literal | `b"fn"` of type `[]u8` | **high** until #351 is merged | *In klin PR #351 (not merged)* (G5). Keyword table, messages, paths: `b"fn"`, `b"error: "`. Rules: `.len` counts bytes, no implicit trailing NUL (`b"/proc/self/cmdline\0"` has len 19); escapes `\n \t \\ \" \$ \0`; `\0` is one NUL byte, not octal (`b"\00"` = NUL + `'0'`); no interpolation; bytes are read-only, checked only on the literal / constant itself (`b"fn"[0] = 1` is an error; a write through a copy or a `[]u8` param compiles and faults) |
+| Byte-string literal | `b"fn"` of type `[]u8` | **high** until #351 is merged | *In klin PR #351 (not merged)* (G5). Keyword table, messages, paths: `b"fn"`, `b"error: "`. Rules: `.len` counts bytes, no implicit trailing NUL (`b"/proc/self/cmdline\0"` has len 19); escapes `\n \t \\ \" \$ \0`; `\0` is one NUL byte, not octal (`b"\00"` = NUL + `'0'`); no interpolation; bytes are read-only, checked only on the literal / constant itself (`b"fn"[0] = 1` is an error; a write through a copy or a `[]u8` param compiles and faults — **DECIDED (C8.1)**: documented as UB for now, type-level enforcement later) |
 | Module-level `const` | `const PAGE: i64 = 4096` | **high** until #351 is merged | *In klin PR #351 (not merged)* (G8). `pub? const Name: Type = literal`, top level only. Types: integer prims, `bool`, `[]u8`. Initializer is a literal (`-100`, hex, `'A'`, `true`, `b"…"`) — no expressions, no other const. Imported as `mod.NAME` (`os.AT_FDCWD`). Immutable: `NAME = …` and `KW[0] = …` are errors; a local shadows a const. **Not usable as an `[N]T` length** (`[N]u8` → parse error) — array lengths stay integer literals. No mutable globals |
 | Strings for the compiler | `[]u8` + `i32` offsets | low | All source text, identifiers and output buffers are `[]u8`; literals are `b"…"`. `str` is not used in compiler code |
 
@@ -239,6 +242,7 @@ pub fn slice_i64(addr: i64, len: i64): []i64
 
 // Slice → address, for syscall arguments (buffers, paths). Klin has no
 // pointer → integer cast (G9). Kliner: intrinsic. Bootstrap: shim.
+// Part of the runtime API — DECIDED (C8.4).
 pub fn addr_u8(b: []u8): i64
 ```
 
@@ -327,6 +331,8 @@ pub fn check(r: i64): !i64 {
 ```
 
 `-4095` alone is an `i32` expression (C2, Integers), so it is cast.
+Once C8.3 lands in Klin, `r >= -4095` is enough; the cast stays in the
+examples until then.
 
 So `err` in an `or { }` block **is** the errno (`2` = ENOENT,
 `9` = EBADF, `12` = ENOMEM, `13` = EACCES, `21` = EISDIR, `22` = EINVAL).
@@ -384,7 +390,7 @@ pub fn alloc_u8(a: *mut Arena, n: i32): ![]u8     // 8-byte aligned, zeroed; ENO
 pub fn alloc_i32(a: *mut Arena, n: i32): ![]i32
 pub fn alloc_i64(a: *mut Arena, n: i32): ![]i64
 pub fn mark(a: *mut Arena): i64
-pub fn reset(a: *mut Arena, m: i64)          // zeroes [m, used), then used = m
+pub fn reset(a: *mut Arena, m: i64)          // zeroes [m, used), then used = m (DECIDED, C8.4)
 pub fn free_all(a: *mut Arena)               // munmap
 ```
 
@@ -513,3 +519,28 @@ fn report(c: *mut Ctx, pos: i32) {
     out.nl((*c).err)
 }
 ```
+
+---
+
+## C8. Review decisions — DECIDED (2026-10-23)
+
+Questions from the review of C1–C4 / C6 and klin PR #351, answered by
+Marek. C1–C4 and C6 as a whole stay PROPOSED.
+
+1. **`b"..."` bytes are read-only — documented only, for now.** The
+   checker rejects a direct write (`b"fn"[0] = 1`, `KW[0] = 1`). A write
+   through a copy (`let s = b"fn"; s[0] = 1`) or a `[]u8` parameter is
+   undefined behavior (in practice a crash: the bytes are in read-only
+   memory). Type-level enforcement (a read-only `[]u8`) comes later.
+   Compiler code copies into a `[N]u8` or an arena buffer before writing.
+2. **Out-of-range integer literals are a compile error** in `const` and
+   `let` (`const X: u8 = 300`, `let y: i8 = 200`). Today Klin wraps
+   silently (`300` → `44`). *Pending in Klin.*
+3. **Unary `-` / `~` on a literal take the expected type**, like a bare
+   literal: `f(-1)` for an `i64` param, `r >= -4095` with `r: i64`, no
+   `cast(i64, -1)`. *Pending in Klin.* Until it lands, examples here keep
+   the `cast` (C2 Integers, C6 `check`).
+4. **`sys.addr_u8(b: []u8): i64` and zeroing `arena.reset`** are part of
+   the runtime API (C6). `addr_u8` is a Kliner intrinsic and a shim
+   function in bootstrap; `reset(a, m)` zeroes `[m, used)` so every
+   `alloc_*` result is zeroed (ZII, D6).
