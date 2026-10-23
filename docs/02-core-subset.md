@@ -18,8 +18,12 @@ with that Klin (Dart 3.13.7 → C → gcc).
 
 Status: C1–C4 and C6 **PROPOSED**. The five stage-1 questions are
 **DECIDED (2026-10-23)** — see [C7](#c7-decisions--decided-2026-10-23).
-Items marked *pending in klin-lang/klin* are changes to Klin that the
-compiler source relies on; until they land, the listed workaround applies.
+Items marked *in klin PR #351 (not merged)* are changes to Klin that the
+compiler source relies on. They are implemented in
+[klin-lang/klin#351](https://github.com/klin-lang/klin/pull/351) (branch
+`cursor/kliner-bootstrap-gaps-2073`); the examples here were compiled with
+that branch on 2026-10-23. Until #351 is merged, the listed workaround
+applies.
 
 ---
 
@@ -55,26 +59,26 @@ and probed OK.
 | `let` / `let mut` / `:=` | | low | ZII: zeroed when no initializer (D6) |
 | Control flow | `if` / `else if` / `while` / `for i in a..<b` / C-style `for` / `break` / `continue` / `return` | low | |
 | `match` on integers and enums | value groups, `a..=b`, relational arms, `when`, `else` | low | Lexer/parser dispatch. Probed: `match c { 48..=57 {…} 32, 10 {…} else {…} }` |
-| `enum` (named integer) | `enum Tok: u8 { … }`, `Tok.Ident`, `cast(u8, Tok.Ident)` | **high** as a field type | *Probed:* `struct T { k: Tok }` → `unknown type 'Tok'`. Locals/params/returns work. Fix *pending in klin-lang/klin* (G2); until then `u8` field + `cast` |
-| `struct` + methods | `fn (v: T) f()`, `fn (mut v: T) f()`, `Type.fn` | low | Nested structs and `[N]T` fields probed OK |
+| `enum` (named integer) | `enum Tok: u8 { … }`, `Tok.Ident`, `cast(u8, Tok.Ident)` | **high** as a field type | *Probed:* `struct T { k: Tok }` → `unknown type 'Tok'`. Locals/params/returns work. Fix *in klin PR #351 (not merged)* (G2); until merged `u8` field + `cast` |
+| `struct` + methods | `fn (v: T) f()`, `fn (mut v: T) f()`, `Type.fn` | low | Nested structs and `[N]T` fields probed OK. `fn (mut v: T)` needs a plain `let mut` local as receiver — not `(*p).f` (G11); state behind `*mut` uses free functions |
 | Fixed arrays | `[N]T`, `xs[i]`, `xs.len`, `[N]Struct` | low | Arrays of structs probed OK |
-| Slices of primitives | `[]u8`, `[]i32`, `[]i64`, `xs[:]`, `xs.len` | medium | Params and fields OK. *Probed:* `let s = xs[:]; s[0] = 7` → broken C (G4). Fix *pending in klin-lang/klin*; until then pass `xs[:]` directly |
-| Pointers | `*T` / `*mut T`, `&x`, `*p`, `(*p).f` | **high** for self-reference | *Probed:* `struct Node { next: *mut Node }` → broken C (anonymous `typedef struct`). Pointers to other structs OK. Fix *pending in klin-lang/klin* (G1) |
+| Slices of primitives | `[]u8`, `[]i32`, `[]i64`, `xs[:]`, `xs.len` | medium | Params and fields OK. *Probed:* `let s = xs[:]; s[0] = 7` → broken C (G4). Fix *in klin PR #351 (not merged)*; until merged pass `xs[:]` directly |
+| Pointers | `*T` / `*mut T`, `&x`, `*p`, `(*p).f` | **high** for self-reference | *Probed:* `struct Node { next: *mut Node }` → broken C (anonymous `typedef struct`). Pointers to other structs OK. Fix *in klin PR #351 (not merged)* (G1) |
 | `!T` errors | `!T`, `error(n)`, `expr!`, `or { }`, `err` | low | `!Struct` probed OK. Errno maps 1:1 to `error(n)` (C5) |
 | `defer` | block-scoped, LIFO | low | Covered by Klin goldens (`defer_*`) |
 | Modules | `module`, `import`, `import path alias`, `pub` | low | Search paths `-I` are used for target selection (C5) |
 | `$fn` generics | `$fn vec(name: str, T: type) { … }`, `$vec("VecI32", i32)` | medium | Probed OK. Risk: error messages inside expansions. Use only for a few container shapes |
 | Function pointers | `fn(T): R`, no capture | low/medium | *Probed:* `h.cb(1)` on a field parses as a method → bind first: `let f = h.cb; f(1)` (G7) |
 | Destructuring / multi-assign | `let { x, y } = p`, `a, b = b, a` | low | Optional; lowers to plain moves |
-| Byte-string literal | `b"fn"` of type `[]u8` | **high** until it lands | *Pending in klin-lang/klin* (G5). Keyword table, messages, paths: `b"fn"`, `b"error: "` |
-| Module-level `const` | `const PAGE: i64 = 4096` | **high** until it lands | *Pending in klin-lang/klin* (G8). Immutable only — no mutable globals |
+| Byte-string literal | `b"fn"` of type `[]u8` | **high** until #351 is merged | *In klin PR #351 (not merged)* (G5). Keyword table, messages, paths: `b"fn"`, `b"error: "`. Rules: `.len` counts bytes, no implicit trailing NUL (`b"/proc/self/cmdline\0"` has len 19); escapes `\n \t \\ \" \$ \0`; `\0` is one NUL byte, not octal (`b"\00"` = NUL + `'0'`); no interpolation; bytes are read-only (`b"fn"[0] = 1` is an error) |
+| Module-level `const` | `const PAGE: i64 = 4096` | **high** until #351 is merged | *In klin PR #351 (not merged)* (G8). `pub? const Name: Type = literal`, top level only. Types: integer prims, `bool`, `[]u8`. Initializer is a literal (`-100`, hex, `'A'`, `true`, `b"…"`) — no expressions, no other const. Imported as `mod.NAME` (`os.AT_FDCWD`). Immutable: `NAME = …` and `KW[0] = …` are errors; a local shadows a const. **Not usable as an `[N]T` length** (`[N]u8` → parse error) — array lengths stay integer literals. No mutable globals |
 | Strings for the compiler | `[]u8` + `i32` offsets | low | All source text, identifiers and output buffers are `[]u8`; literals are `b"…"`. `str` is not used in compiler code |
 
 ### Data model this forces
 
 Klin has no tagged unions (payload enums are "not in the language",
-`syntax.md`), self-referential pointers do not build (G1) and slices of
-structs are rejected (G3). G1 is being fixed in Klin, but the table
+`syntax.md`), self-referential pointers do not build on Klin main (G1) and slices of
+structs are rejected (G3). G1 is fixed in klin PR #351 (not merged), but the table
 model stays the choice — it is also the fastest and simplest:
 
 - **Compiler state in one context struct** passed as `*mut Ctx` — no
@@ -128,25 +132,27 @@ Kliner reports a clear error, e.g.
 ## C5. Gaps in current Klin found by probes
 
 These matter because the compiler source must build with current Klin.
-G1, G2, G4, G5 (`b"…"`) and G8 (`const`) are **pending in klin-lang/klin**
-(decided 2026-10-23, handed to Klin maintainers). The others use the
-workaround.
+G1, G2, G4, G5 (`b"…"`) and G8 (`const`) are **in klin PR #351 (not
+merged)** ([klin-lang/klin#351](https://github.com/klin-lang/klin/pull/351),
+decided 2026-10-23). Their workaround applies until #351 is merged. The
+others (G3, G6, G7, G9, G10, G11, mutable globals) keep the workaround.
 
 | # | Probe | Result | Workaround | Fix in Klin? |
 |---|---|---|---|---|
-| G1 | `struct Node { next: *mut Node }` | C error: incompatible pointer type (anonymous typedef) | Index-based tables (C2) | **Pending in klin-lang/klin** — bug, small (named struct tag) |
-| G2 | `struct T { k: Tok }` (enum field) | `unknown type 'Tok'` | `k: u8` + `cast` until fixed | **Pending in klin-lang/klin** — bug |
+| G1 | `struct Node { next: *mut Node }` | C error: incompatible pointer type (anonymous typedef) | Index-based tables (C2) | **In klin PR #351 (not merged)** — bug (named struct tag); test `test/self_ref_struct.kl` |
+| G2 | `struct T { k: Tok }` (enum field) | `unknown type 'Tok'` | `k: u8` + `cast` until #351 is merged | **In klin PR #351 (not merged)** — bug |
 | G3 | `[]Token` (slice of struct), `fn main(args: []str)` | `slice requires a primitive element type` | Struct-of-arrays, `[N]Struct` | Yes — feature, medium |
-| G4 | `let s = xs[:]; s[0] = 7` | C error: `request for member 'ptr'` | Pass `xs[:]` directly until fixed | **Pending in klin-lang/klin** — bug |
-| G5 | `take("abc")` where `take(s: []u8)`; `"abc".len` | `str` is a C string pointer: not `[]u8`, no `.len`, no indexing | — | **Pending in klin-lang/klin:** byte-string literal `b"fn"` of type `[]u8` |
+| G4 | `let s = xs[:]; s[0] = 7` | C error: `request for member 'ptr'` | Pass `xs[:]` directly until #351 is merged | **In klin PR #351 (not merged)** — bug; test `test/slice_view_write.kl` |
+| G5 | `take("abc")` where `take(s: []u8)`; `"abc".len` | `str` is a C string pointer: not `[]u8`, no `.len`, no indexing | — | **In klin PR #351 (not merged):** byte-string literal `b"fn"` of type `[]u8` (rules in C2) |
 | G6 | `xs[1:3]` | parse error — only `xs[:]` exists | `(slice, start, len)` triples | Yes — feature, small |
 | G7 | `h.cb(1)` on an `fn` field | parsed as method call | `let f = h.cb; f(1)` | Optional |
-| G8 | top-level `let N: i32 = 3` | parse error — no globals / consts | Context struct passed as `*mut Ctx` (state); `const` (values) | **Pending in klin-lang/klin:** module-level `const` only; mutable globals stay out |
+| G8 | top-level `let N: i32 = 3` | parse error — no globals / consts | Context struct passed as `*mut Ctx` (state); `const` (values) | **In klin PR #351 (not merged):** module-level `const` only (literal initializer, not an `[N]T` length); mutable globals stay out (D11: no `let` at module scope) |
 | G9 | `cast(usize, &x)` (pointer → integer) | `numeric cast requires an integer or float`. Integer → pointer works | Not needed in the compiler; runtime only (intrinsic) | Optional |
 | G10 | no `argc` / `argv` in Klin | `main()` takes no arguments | Read `/proc/self/cmdline` (C6) — decided for v0 | Not needed |
+| G11 | `(*c).err.lit(b"x")` (mutating method on a field via `*mut Ctx`); `&(*c).err` | `mutating method requires a mutable variable`; `&(*c).err` is `*Out`, not `*mut Out` (also on #351) | `out` uses free functions on `*mut Out`; `Ctx` holds `err: *mut out.Out` (C6, C7) | Optional |
 | — | `[65, 66]` as `[2]u8` initializer | literals typed as `[2]i32` | `cast(u8, 65)` per element or char literals | Optional |
 
-G1, G2, G4, `b"…"` and `const` should land in Klin before stage 2 starts
+G1, G2, G4, `b"…"` and `const` (klin PR #351) should be merged into Klin before stage 2 starts
 — the frontend is written against them. G3, G6, G7, G9 keep their
 workarounds.
 
@@ -301,6 +307,7 @@ import sys
 pub fn open_read(path: []u8): !i32           // path: NUL-terminated bytes
 pub fn open_write(path: []u8): !i32          // O_WRONLY | O_CREAT | O_TRUNC, mode 0o755 (output is executable)
 pub fn close(fd: i32): !i32
+pub fn close_quiet(fd: i32)                  // close, ignore error (for `defer`)
 pub fn read(fd: i32, buf: []u8, off: i32, n: i32): !i32
 pub fn write_all(fd: i32, buf: []u8, off: i32, n: i32): !i32
 pub fn file_size(fd: i32): !i64              // lseek(SEEK_END) + lseek(SEEK_SET)
@@ -360,16 +367,22 @@ pub struct Out {
 
 pub fn Out.stdout(): Out
 pub fn Out.stderr(): Out
-pub fn (mut o: Out) bytes(b: []u8, off: i32, n: i32)
-pub fn (mut o: Out) lit(b: []u8)             // whole slice, e.g. o.lit(b"error: ")
-pub fn (mut o: Out) dec(v: i64)
-pub fn (mut o: Out) hex(v: u64)
-pub fn (mut o: Out) nl()
-pub fn (mut o: Out) flush(): !i32
+pub fn bytes(o: *mut Out, b: []u8, off: i32, n: i32)
+pub fn lit(o: *mut Out, b: []u8)             // whole slice, e.g. out.lit(o, b"error: ")
+pub fn dec(o: *mut Out, v: i64)
+pub fn hex(o: *mut Out, v: u64)
+pub fn nl(o: *mut Out)
+pub fn flush(o: *mut Out): !i32
+pub fn flush_quiet(o: *mut Out)              // flush, ignore error (for `defer`)
 ```
 
-Explicit buffer, explicit `flush` — no hidden cost. `defer o.flush()`
-at the end of `main`.
+Explicit buffer, explicit `flush` — no hidden cost. `defer
+out.flush_quiet(&o)` at the end of `main` (Klin rejects an ignored `!T`,
+so `defer out.flush(&o)` does not build). The buffer length is the literal
+`4096`: a `const` cannot be an `[N]T` length. Free functions on
+`*mut Out`, not `(mut o: Out)` methods, because a mutating method only
+accepts a plain `let mut` local as receiver (G11) — the compiler reaches
+its outputs through `*mut Ctx`.
 
 ### Intrinsics Kliner must provide
 
@@ -391,17 +404,18 @@ The open questions of this stage, answered by Marek.
 
 1. **Bytes from literals (G5):** Klin gets a byte-string literal
    **`b"fn"` of type `[]u8`**. Compiler code uses `b"…"` for keywords,
-   messages and paths; `str` is not used there. *Pending in klin-lang/klin.*
+   messages and paths; `str` is not used there. *In klin PR #351 (not merged).*
 2. **G1 / G2 / G4 are fixed in Klin itself**, not worked around in Kliner
-   source. Handed to Klin maintainers. *Pending in klin-lang/klin.*
+   source. *In klin PR #351 (not merged)*; workarounds (C5) until merged.
 3. **Module-level `const`** is added to Klin (`pub const PAGE: i64 = 4096`).
    Compiler state lives in a **context struct** passed as `*mut Ctx`;
-   **no mutable globals**. *Pending in klin-lang/klin.*
+   **no mutable globals**. *In klin PR #351 (not merged).* A const
+   initializer is a literal and a const is not an `[N]T` length.
 4. **Arguments in v0** come from `/proc/self/cmdline`. OK.
 5. **The bootstrap C shim** (`rt/bootstrap/shim.c`) may depend on Klin's
    internal C layout of `[]T`. OK — bootstrap only.
 
-Example with the decided forms:
+Example with the decided forms (compiled with the #351 branch, 2026-10-23):
 
 ```klin
 module os
@@ -413,22 +427,22 @@ pub const O_RDONLY: i64 = 0
 pub fn args(a: *mut arena.Arena): !Args {
     let fd = open_read(b"/proc/self/cmdline\0")!
     defer close_quiet(fd)          // close, ignore error
-    …
+    …                              // b"/proc/self/cmdline\0".len == 19
 }
 ```
 
 ```klin
 struct Ctx {
     arena: arena.Arena
-    err: out.Out
+    err: *mut out.Out              // pointer: see G11
     src: []u8
     tok_kind: []u8
     tok_start: []i32
 }
 
 fn report(c: *mut Ctx, pos: i32) {
-    (*c).err.lit(b"error: unexpected token at ")
-    (*c).err.dec(cast(i64, pos))
-    (*c).err.nl()
+    out.lit((*c).err, b"error: unexpected token at ")
+    out.dec((*c).err, cast(i64, pos))
+    out.nl((*c).err)
 }
 ```
