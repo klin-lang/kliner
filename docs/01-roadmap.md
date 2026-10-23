@@ -7,6 +7,8 @@ Status: **design phase, no code yet.**
 
 ## 1. Core subset + runtime
 
+Proposal: [02-core-subset.md](02-core-subset.md).
+
 - [ ] Define the Klin subset used to write the compiler (no `cimport`, no `asm`)
 - [ ] Document what is in the shared core and what is Klin-only
 - [ ] Mini runtime on Linux syscalls: `_start`, exit, memory/allocator
