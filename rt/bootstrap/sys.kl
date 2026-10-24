@@ -28,3 +28,9 @@ pub const NR_GETDENTS64: i64 = 217
 pub const NR_EXIT_GROUP: i64 = 231
 pub const NR_OPENAT: i64 = 257
 pub const NR_NEWFSTATAT: i64 = 262
+pub const NR_MEMFD_CREATE: i64 = 319
+
+// The target (kliner-build's default --target, C15): 1 x86-64, 2 RV64.
+pub const ARCH: i32 = 1
+// Offset of st_mode (u32) in `struct stat` (144 bytes on both targets).
+pub const STAT_MODE: i32 = 24

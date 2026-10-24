@@ -1,0 +1,506 @@
+// module rv64 — the Linux RISC-V 64 backend (stage 7, docs/07-rv64.md).
+// enc.kl: the code buffer, fixups and the instruction encoder. Only the
+// RV64IM base: no compressed (C) instructions, no floating point, no
+// atomics. Every instruction is 4 bytes, little endian.
+module rv64
+import arena
+import back
+import ir
+
+pub const ZERO: i32 = 0
+pub const RA: i32 = 1
+pub const SP: i32 = 2
+pub const T0: i32 = 5 // address / immediate temporary
+pub const T1: i32 = 6
+pub const T2: i32 = 7
+pub const FP: i32 = 8 // s0
+pub const S1: i32 = 9 // the program stack's base (SIGSEGV handler)
+pub const A0: i32 = 10
+pub const A1: i32 = 11
+pub const A2: i32 = 12
+pub const A3: i32 = 13
+pub const A4: i32 = 14
+pub const A5: i32 = 15
+pub const A6: i32 = 16
+pub const A7: i32 = 17
+pub const S2: i32 = 18 // the kernel's initial sp (argc / argv)
+
+// fixup targets: as in x64
+pub const FX_LAB: i32 = 0 // tgt = global label index (Prog.labs)
+pub const FX_FN: i32 = 1 // tgt = function index
+pub const FX_DATA: i32 = 2 // tgt = offset in the string data
+pub const FX_BSS: i32 = 3 // tgt = offset in the globals
+pub const FX_HELP: i32 = 4 // tgt = helper (back.H_*)
+
+// fixup forms
+pub const F_J: i32 = 0 // jal: ±1 MiB
+pub const F_PAIR: i32 = 1 // auipc + an I-type (addi / jalr) at pos + 4: ±2 GiB
+
+pub const E_RV64: i32 = 1007
+
+pub struct Fix {
+    pos: i32
+    kind: i32
+    form: i32
+    tgt: i64
+}
+
+pub struct Cg {
+    a: *mut arena.Arena
+    g: *mut ir.Prog
+    b: []u8 // machine code
+    n: i32
+    fix: []Fix
+    nf: i32
+    lpos: []i32 // global label index -> code offset
+    fpos: []i32 // function -> code offset (-1: no code)
+    fend: []i32
+    hpos: []i32 // helper -> code offset
+    hend: []i32
+    tmsg: []i64 // trap messages: data offsets
+    tlen: []i32
+    fi: i32 // function being generated
+    msg: []u8
+    mn: i32
+}
+
+fn alloc_fix(a: *mut arena.Arena, n: i32): ![]Fix {
+    let two: [2]Fix
+    let size = cast(i64, &two[1]) - cast(i64, &two[0])
+    let p = cast(*mut [arena.MAX_LEN]Fix, arena.alloc_addr(a, size * cast(i64, n))!)
+    return (*p)[:n]
+}
+
+pub fn Cg.new(a: *mut arena.Arena, g: *mut ir.Prog): !Cg {
+    let mut c: Cg
+    c.a = a
+    c.g = g
+    c.b = arena.alloc_u8(a, 1 << 16)!
+    c.fix = alloc_fix(a, 1024)!
+    c.lpos = arena.alloc_i32(a, (*g).labs.len + 1)!
+    c.fpos = arena.alloc_i32(a, (*g).nfn + 1)!
+    c.fend = arena.alloc_i32(a, (*g).nfn + 1)!
+    c.hpos = arena.alloc_i32(a, back.NHELP)!
+    c.hend = arena.alloc_i32(a, back.NHELP)!
+    c.tmsg = arena.alloc_i64(a, back.NTRAP)!
+    c.tlen = arena.alloc_i32(a, back.NTRAP)!
+    c.msg = arena.alloc_u8(a, 512)!
+    for i in 0..<(*g).nfn + 1 {
+        c.fpos[i] = -1
+    }
+    return c
+}
+
+pub fn madd(c: *mut Cg, s: []u8) {
+    for i in 0..<s.len {
+        if (*c).mn < (*c).msg.len {
+            (*c).msg[(*c).mn] = s[i]
+            (*c).mn += 1
+        }
+    }
+}
+
+pub fn message(c: *mut Cg): []u8 {
+    return (*c).msg[0:(*c).mn]
+}
+
+// At least k free bytes in the code buffer and 32 free fixups.
+pub fn room(c: *mut Cg, k: i32): !i32 {
+    if (*c).n + k > (*c).b.len {
+        let mut m = (*c).b.len * 2
+        while (*c).n + k > m {
+            m = m * 2
+        }
+        let mut bigger = arena.alloc_u8((*c).a, m)!
+        for i in 0..<(*c).n {
+            bigger[i] = (*c).b[i]
+        }
+        (*c).b = bigger
+    }
+    if (*c).nf + 32 > (*c).fix.len {
+        let mut more = alloc_fix((*c).a, (*c).fix.len * 2)!
+        for i in 0..<(*c).nf {
+            more[i] = (*c).fix[i]
+        }
+        (*c).fix = more
+    }
+    return 0
+}
+
+fn fixup(c: *mut Cg, kind: i32, form: i32, tgt: i64) {
+    (*c).fix[(*c).nf] = Fix{pos: (*c).n, kind: kind, form: form, tgt: tgt}
+    (*c).nf += 1
+}
+
+pub fn w32(c: *mut Cg, v: i64) {
+    let mut x = v
+    for i in 0..<4 {
+        (*c).b[(*c).n] = cast(u8, x & 0xff)
+        (*c).n += 1
+        x = x >> 8
+    }
+}
+
+pub fn get32(c: *mut Cg, at: i32): i64 {
+    let mut v: i64 = 0
+    for i in 0..<4 {
+        v = v | (cast(i64, (*c).b[at + i]) << (8 * cast(i64, i)))
+    }
+    return v
+}
+
+// ORs bits into the instruction at `at` (its immediate fields are 0).
+pub fn or32(c: *mut Cg, at: i32, v: i64) {
+    let x = get32(c, at) | v
+    for i in 0..<4 {
+        (*c).b[at + i] = cast(u8, (x >> (8 * cast(i64, i))) & 0xff)
+    }
+}
+
+pub fn fits12(v: i64): bool {
+    return v >= -2048 && v <= 2047
+}
+
+pub fn fits32(v: i64): bool {
+    return v >= -2147483648 && v <= 2147483647
+}
+
+// --- instruction formats ---
+
+fn r_op(c: *mut Cg, f7: i64, f3: i64, rd: i32, rs1: i32, rs2: i32) {
+    w32(c, (f7 << 25) | (cast(i64, rs2) << 20) | (cast(i64, rs1) << 15) | (f3 << 12) | (cast(i64, rd) << 7) | 0x33)
+}
+
+pub fn i_op(c: *mut Cg, op: i64, f3: i64, rd: i32, rs1: i32, imm: i64) {
+    w32(c, ((imm & 0xfff) << 20) | (cast(i64, rs1) << 15) | (f3 << 12) | (cast(i64, rd) << 7) | op)
+}
+
+fn s_op(c: *mut Cg, f3: i64, base: i32, src: i32, imm: i64) {
+    w32(c, (((imm >> 5) & 0x7f) << 25) | (cast(i64, src) << 20) | (cast(i64, base) << 15) | (f3 << 12) | ((imm & 0x1f) << 7) | 0x23)
+}
+
+fn u_op(c: *mut Cg, op: i64, rd: i32, imm20: i64) {
+    w32(c, ((imm20 & 0xfffff) << 12) | (cast(i64, rd) << 7) | op)
+}
+
+pub fn benc(off: i64): i64 {
+    return (((off >> 12) & 1) << 31) | (((off >> 5) & 0x3f) << 25) | (((off >> 1) & 0xf) << 8) | (((off >> 11) & 1) << 7)
+}
+
+pub fn jenc(off: i64): i64 {
+    return (((off >> 20) & 1) << 31) | (((off >> 1) & 0x3ff) << 21) | (((off >> 11) & 1) << 20) | (((off >> 12) & 0xff) << 12)
+}
+
+// branch conditions (funct3 of BRANCH)
+pub const BEQ: i64 = 0
+pub const BNE: i64 = 1
+pub const BLT: i64 = 4
+pub const BGE: i64 = 5
+pub const BLTU: i64 = 6
+pub const BGEU: i64 = 7
+
+// A conditional branch by `off` bytes from itself (|off| < 4 KiB).
+pub fn br(c: *mut Cg, cond: i64, rs1: i32, rs2: i32, off: i64) {
+    w32(c, benc(off) | (cast(i64, rs2) << 20) | (cast(i64, rs1) << 15) | (cond << 12) | 0x63)
+}
+
+// A forward branch patched by here_b.
+pub fn br_fwd(c: *mut Cg, cond: i64, rs1: i32, rs2: i32): i32 {
+    let at = (*c).n
+    br(c, cond, rs1, rs2, 0)
+    return at
+}
+
+pub fn here_b(c: *mut Cg, at: i32) {
+    or32(c, at, benc(cast(i64, (*c).n - at)))
+}
+
+// A short backward branch to code offset `to`.
+pub fn br_back(c: *mut Cg, cond: i64, rs1: i32, rs2: i32, to: i32) {
+    br(c, cond, rs1, rs2, cast(i64, to - (*c).n))
+}
+
+pub fn ecall(c: *mut Cg) {
+    w32(c, 0x73)
+}
+
+pub fn addi(c: *mut Cg, rd: i32, rs: i32, imm: i64) {
+    i_op(c, 0x13, 0, rd, rs, imm)
+}
+
+pub fn mv(c: *mut Cg, rd: i32, rs: i32) {
+    addi(c, rd, rs, 0)
+}
+
+pub fn add(c: *mut Cg, rd: i32, a: i32, b: i32) {
+    r_op(c, 0, 0, rd, a, b)
+}
+
+pub fn sub(c: *mut Cg, rd: i32, a: i32, b: i32) {
+    r_op(c, 0x20, 0, rd, a, b)
+}
+
+// R-type ALU with funct7 / funct3
+pub fn alu(c: *mut Cg, f7: i64, f3: i64, rd: i32, a: i32, b: i32) {
+    r_op(c, f7, f3, rd, a, b)
+}
+
+pub fn slli(c: *mut Cg, rd: i32, rs: i32, sh: i64) {
+    i_op(c, 0x13, 1, rd, rs, sh)
+}
+
+pub fn srli(c: *mut Cg, rd: i32, rs: i32, sh: i64) {
+    i_op(c, 0x13, 5, rd, rs, sh)
+}
+
+pub fn srai(c: *mut Cg, rd: i32, rs: i32, sh: i64) {
+    i_op(c, 0x13, 5, rd, rs, 0x400 | sh)
+}
+
+pub fn andi(c: *mut Cg, rd: i32, rs: i32, imm: i64) {
+    i_op(c, 0x13, 7, rd, rs, imm)
+}
+
+pub fn xori(c: *mut Cg, rd: i32, rs: i32, imm: i64) {
+    i_op(c, 0x13, 4, rd, rs, imm)
+}
+
+pub fn sltiu(c: *mut Cg, rd: i32, rs: i32, imm: i64) {
+    i_op(c, 0x13, 3, rd, rs, imm)
+}
+
+pub fn addiw(c: *mut Cg, rd: i32, rs: i32, imm: i64) {
+    i_op(c, 0x1b, 0, rd, rs, imm)
+}
+
+pub fn jalr(c: *mut Cg, rd: i32, rs: i32, imm: i64) {
+    i_op(c, 0x67, 0, rd, rs, imm)
+}
+
+// rd = v, any 64-bit v: addi; lui + addiw; or (recursively) the upper
+// part, a shift and an addi.
+pub fn li(c: *mut Cg, rd: i32, v: i64) {
+    if fits12(v) {
+        addi(c, rd, ZERO, v)
+        return
+    }
+    if fits32(v) {
+        let hi = (v + 0x800) >> 12
+        let lo = v - (hi << 12)
+        u_op(c, 0x37, rd, hi) // lui
+        if lo != 0 {
+            addiw(c, rd, rd, lo)
+        }
+        return
+    }
+    let lo = ((v & 0xfff) ^ 0x800) - 0x800
+    let mut hi = (v >> 12) + ((v >> 11) & 1)
+    let mut sh: i64 = 12
+    while (hi & 1) == 0 {
+        hi = hi >> 1
+        sh += 1
+    }
+    li(c, rd, hi)
+    slli(c, rd, rd, sh)
+    if lo != 0 {
+        addi(c, rd, rd, lo)
+    }
+}
+
+// rd = base + off (rd may be base; base != T0 when off is large).
+pub fn addr(c: *mut Cg, rd: i32, base: i32, off: i64) {
+    if fits12(off) {
+        addi(c, rd, base, off)
+        return
+    }
+    li(c, T0, off)
+    add(c, rd, base, T0)
+}
+
+// LOAD funct3 for type t (sign- or zero-extending to 64 bits)
+fn ld_f3(t: u8): i64 {
+    if t == ir.I8 {
+        return 0
+    }
+    if t == ir.I16 {
+        return 1
+    }
+    if t == ir.I32 {
+        return 2
+    }
+    if t == ir.U8 {
+        return 4
+    }
+    if t == ir.U16 {
+        return 5
+    }
+    if t == ir.U32 {
+        return 6
+    }
+    return 3
+}
+
+// STORE funct3 for a w-byte store
+fn st_f3(w: i64): i64 {
+    if w == 1 {
+        return 0
+    }
+    if w == 2 {
+        return 1
+    }
+    if w == 4 {
+        return 2
+    }
+    return 3
+}
+
+// rd = [base + off] with LOAD funct3 f3 (base != T0 for a large off).
+pub fn ld_f(c: *mut Cg, f3: i64, rd: i32, base: i32, off: i64) {
+    if fits12(off) {
+        i_op(c, 0x03, f3, rd, base, off)
+        return
+    }
+    li(c, T0, off)
+    add(c, T0, T0, base)
+    i_op(c, 0x03, f3, rd, T0, 0)
+}
+
+// [base + off] = src, w bytes (src, base != T0 for a large off).
+pub fn st_w(c: *mut Cg, w: i64, src: i32, base: i32, off: i64) {
+    if fits12(off) {
+        s_op(c, st_f3(w), base, src, off)
+        return
+    }
+    li(c, T0, off)
+    add(c, T0, T0, base)
+    s_op(c, st_f3(w), T0, src, 0)
+}
+
+pub fn ld8(c: *mut Cg, rd: i32, base: i32, off: i64) {
+    ld_f(c, 3, rd, base, off)
+}
+
+pub fn sd(c: *mut Cg, src: i32, base: i32, off: i64) {
+    st_w(c, 8, src, base, off)
+}
+
+pub fn load_t(c: *mut Cg, t: u8, rd: i32, base: i32, off: i64) {
+    ld_f(c, ld_f3(t), rd, base, off)
+}
+
+// unsigned w-byte load (copies)
+pub fn ld_w(c: *mut Cg, w: i64, rd: i32, base: i32, off: i64) {
+    if w == 8 {
+        ld_f(c, 3, rd, base, off)
+    } else if w == 4 {
+        ld_f(c, 6, rd, base, off)
+    } else if w == 2 {
+        ld_f(c, 5, rd, base, off)
+    } else {
+        ld_f(c, 4, rd, base, off)
+    }
+}
+
+pub fn store_t(c: *mut Cg, t: u8, src: i32, base: i32, off: i64) {
+    st_w(c, ir.tsize(t), src, base, off)
+}
+
+// IR register r lives at fp - 8 (r + 1).
+fn rdisp(r: i32): i64 {
+    return -8 * (cast(i64, r) + 1)
+}
+
+pub fn ldr(c: *mut Cg, rd: i32, r: i32) {
+    ld8(c, rd, FP, rdisp(r))
+}
+
+pub fn stv(c: *mut Cg, r: i32, src: i32) {
+    sd(c, src, FP, rdisp(r))
+}
+
+// Normalizes register r to type t (C13.2): sign- / zero-extends.
+pub fn norm(c: *mut Cg, r: i32, t: u8) {
+    if t == ir.I8 {
+        slli(c, r, r, 56)
+        srai(c, r, r, 56)
+    } else if t == ir.I16 {
+        slli(c, r, r, 48)
+        srai(c, r, r, 48)
+    } else if t == ir.I32 {
+        addiw(c, r, r, 0) // sext.w
+    } else if t == ir.U8 {
+        andi(c, r, r, 255)
+    } else if t == ir.U16 {
+        slli(c, r, r, 48)
+        srli(c, r, r, 48)
+    } else if t == ir.U32 {
+        slli(c, r, r, 32)
+        srli(c, r, r, 32)
+    }
+}
+
+// sp += v
+pub fn add_sp(c: *mut Cg, v: i64) {
+    if v == 0 {
+        return
+    }
+    addr(c, SP, SP, v)
+}
+
+// --- jumps, calls and addresses with fixups ---
+
+pub fn jmp_lab(c: *mut Cg, lab: i32) {
+    fixup(c, FX_LAB, F_J, cast(i64, lab))
+    w32(c, 0x6f) // jal x0, 0
+}
+
+fn pair(c: *mut Cg, kind: i32, tgt: i64, rd: i32) {
+    fixup(c, kind, F_PAIR, tgt)
+    u_op(c, 0x17, rd, 0) // auipc rd, 0
+}
+
+pub fn call_fn(c: *mut Cg, fi: i32) {
+    pair(c, FX_FN, cast(i64, fi), RA)
+    jalr(c, RA, RA, 0)
+}
+
+pub fn call_help(c: *mut Cg, h: i32) {
+    pair(c, FX_HELP, cast(i64, h), RA)
+    jalr(c, RA, RA, 0)
+}
+
+pub fn jmp_help(c: *mut Cg, h: i32) {
+    pair(c, FX_HELP, cast(i64, h), T0)
+    jalr(c, ZERO, T0, 0)
+}
+
+// if rs1 `cond` rs2: jump to helper h (an inverted branch over the jump)
+pub fn bcc_help(c: *mut Cg, cond: i64, rs1: i32, rs2: i32, h: i32) {
+    br(c, cond ^ 1, rs1, rs2, 12)
+    jmp_help(c, h)
+}
+
+// rd = the address of kind / tgt (FX_FN, FX_HELP, FX_DATA, FX_BSS)
+pub fn la(c: *mut Cg, rd: i32, kind: i32, tgt: i64) {
+    pair(c, kind, tgt, rd)
+    addi(c, rd, rd, 0)
+}
+
+// Patches a fixup: delta = target - pos.
+pub fn patch(c: *mut Cg, x: Fix, delta: i64): bool {
+    if x.form == F_J {
+        if delta < -(1 << 20) || delta >= (1 << 20) {
+            return false
+        }
+        or32(c, x.pos, jenc(delta))
+        return true
+    }
+    if !fits32(delta + 0x800) {
+        return false
+    }
+    let hi = (delta + 0x800) >> 12
+    let lo = delta - (hi << 12)
+    or32(c, x.pos, (hi & 0xfffff) << 12)
+    or32(c, x.pos + 4, (lo & 0xfff) << 20)
+    return true
+}

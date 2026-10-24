@@ -156,7 +156,7 @@ The stage 3 parser follows the data model above (`src/ast.kl`):
 
 | Feature | Why later |
 |---|---|
-| `float` / `f32` / `f64` | The compiler does not need floats. Add with SSE2 / FP regs in stage 7+ |
+| `float` / `f32` / `f64` | The compiler does not need floats. Add with SSE2 / FP regs in stage 8+ |
 | `pick` | Sugar over `if`; trivial once `match` exists |
 | String interpolation `"$x"` / `${e}` | Lowers to `printf` / `snprintf` in Klin. Kliner needs its own formatter first |
 | `printf` / `puts` builtins | libc. Kliner maps `puts(str)` to `out` (C6); full `printf` later or never |
@@ -842,7 +842,8 @@ Marek accepted all seven after merging #7 (`5d31ba4`) on 2026-10-24
 
 1. *(DECIDED 2026-10-24)* **Own calling convention**, not SysV: all arguments on
    the stack (`[rsp + 8j]` at the call), result in `rax`; no callee-saved
-   registers besides `rbp`. SysV comes with C interop (stage 10).
+   registers besides `rbp`. SysV comes with C interop (stage 10; stage 11
+   since C15.1).
 2. *(DECIDED 2026-10-24)* **`_start` maps a 1 GiB `MAP_NORESERVE` stack** with a
    1 MiB guard and a `SIGSEGV` handler on an alternate stack, so a stack
    overflow is a trap (`kliner: trap: stack overflow`, exit 134) instead
@@ -860,4 +861,45 @@ Marek accepted all seven after merging #7 (`5d31ba4`) on 2026-10-24
    since Klin `e6058dc` fixed K-B6: `c13` moved to `tests/ir`.)
 7. *(DECIDED 2026-10-24)* **No register allocator, no folding in stage 6**: every
    IR value lives in a frame slot; linear scan, constant folding,
-   immediates and fused compare + branch move to stage 7.
+   immediates and fused compare + branch move to stage 7 (stage 8
+   since C15.1).
+
+## C15. Stage 7: RV64 backend — partly DECIDED (2026-10-24)
+
+Stage 7 ([07-rv64.md](07-rv64.md)) is the Linux RISC-V 64 backend.
+
+1. *(DECIDED 2026-10-24)* **RV64 before the optimizations.** After
+   merging #8 (`c0c1ef9`) Marek chose the RV64 backend (Linux RISC-V 64;
+   RV64GC or RV64IM is enough to start) as stage 7; the optimizations
+   (register allocator, folding, immediates, fused compare + branch)
+   follow in stage 8 together with the fuller language. Later stages
+   move by one (self-hosting 9, more targets 10, after self-hosting 11).
+
+The rest are the design choices of this stage, **PROPOSED**:
+
+2. **RV64IM only**: no compressed (C), float (F / D) or atomic (A)
+   instructions, `e_flags` 0. Runs on every RV64 Linux core; RVC is an
+   optimization for later.
+3. **Same calling convention as C14.1**: arguments on the stack at
+   `sp + 8j`, result in `a0`, only `ra` / `fp` saved; not the RISC-V
+   psABI (that comes with C interop).
+4. **One ELF writer** (`src/back/elf.kl`) for both targets, same layout
+   as C14.5 (`ET_EXEC` at `0x400000`, data at `0x10000000`, `.symtab`);
+   the shared backend parts live in `src/back/`.
+5. **`kliner-build --target x64|rv64`**, default the host the compiler
+   was built for (`sys.ARCH`). The runtime directory is still given
+   with `-I rt/linux_<target>`; later the driver (`kliner`, C14.6)
+   picks it from the target.
+6. **Per-target runtime constants in `sys`**: syscall numbers,
+   `ARCH`, `STAT_MODE` (the `st_mode` offset), `NR_MEMFD_CREATE`;
+   `rt/os.kl` stays shared. `kliner-run` uses the numbers of the
+   program's `sys` module (C13.6), so it needs the host's `rt/linux_*`.
+7. **Tests under `qemu-riscv64` user mode** in `scripts/test.sh`,
+   skipped without qemu; the same goldens and the self-compilation
+   checks as x86-64, plus a cross fixpoint (x86-64 → rv64 → rv64 and
+   back give identical files). Real hardware (Orange Pi RV2) is a
+   manual check ([07-rv64.md](07-rv64.md#test-on-an-orange-pi-rv2)).
+8. **Alignment in the IR (stage 8)**: `Copy` / `Zero` get the
+   alignment of their operands so the RV64 backend does not emit
+   misaligned `ld` / `sd` (legal, but emulated and slow on some cores).
+   Until then inline copies may be misaligned.

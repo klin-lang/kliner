@@ -4,14 +4,18 @@ import check
 import diag
 import ir
 import sys
+import rv64
 import x64
 import lex
 import load
 import os
 import out
 
-// kliner-build: compiles a program to a static x86-64 Linux ELF executable
-// (no libc, no linker) — stage 6 tool (docs/06-x86-64.md).
+// kliner-build: compiles a program to a static Linux ELF executable (no
+// libc, no linker) for x86-64 (stage 6, docs/06-x86-64.md) or RISC-V 64
+// (stage 7, docs/07-rv64.md). --target defaults to the host the compiler
+// was built for (sys.ARCH); the runtime directory (-I rt/linux_*) must
+// match the target.
 struct Ctx {
     a: arena.Arena
     o: out.Out
@@ -84,9 +88,51 @@ fn report_ir(c: *mut Ctx, g: *mut ir.Prog) {
 }
 
 fn usage(c: *mut Ctx): i32 {
-    (*c).e.lit(b"usage: kliner-build [-I DIR]... FILE.kl -o OUT")
+    (*c).e.lit(b"usage: kliner-build [--target x64|rv64] [-I DIR]... FILE.kl -o OUT")
     (*c).e.nl()
     return 2
+}
+
+fn cg_error(c: *mut Ctx, msg: []u8): i32 {
+    (*c).e.lit(b"error: ")
+    (*c).e.lit(msg)
+    (*c).e.nl()
+    return 1
+}
+
+// The executable for x86-64 in *img; 1 after a reported error.
+fn build_x64(c: *mut Ctx, g: *mut ir.Prog, img: *mut []u8): !i32 {
+    let mut cg = x64.Cg.new(&(*c).a, g)!
+    let ok = x64.gen(&cg) or {
+        if err != x64.E_X64 {
+            return error(err)
+        }
+        return cg_error(c, x64.message(&cg))
+    }
+    *img = x64.image(&cg) or {
+        if err != x64.E_X64 {
+            return error(err)
+        }
+        return cg_error(c, x64.message(&cg))
+    }
+    return 0
+}
+
+fn build_rv64(c: *mut Ctx, g: *mut ir.Prog, img: *mut []u8): !i32 {
+    let mut cg = rv64.Cg.new(&(*c).a, g)!
+    let ok = rv64.gen(&cg) or {
+        if err != rv64.E_RV64 {
+            return error(err)
+        }
+        return cg_error(c, rv64.message(&cg))
+    }
+    *img = rv64.image(&cg) or {
+        if err != rv64.E_RV64 {
+            return error(err)
+        }
+        return cg_error(c, rv64.message(&cg))
+    }
+    return 0
 }
 
 fn run(c: *mut Ctx): !i32 {
@@ -96,9 +142,20 @@ fn run(c: *mut Ctx): !i32 {
     (*c).p = load.Prog.new(&(*c).a)!
     let mut entry = -1
     let mut outi = -1
+    let mut target = sys.ARCH
     let mut i = 1
     while i < args.list.len {
-        if lex.eq(args.list[i], b"-I") && i + 1 < args.list.len {
+        if lex.eq(args.list[i], b"--target") && i + 1 < args.list.len {
+            let t = args.list[i + 1]
+            if lex.eq(t, b"x64") || lex.eq(t, b"x86_64") {
+                target = 1
+            } else if lex.eq(t, b"rv64") || lex.eq(t, b"riscv64") {
+                target = 2
+            } else {
+                return usage(c)
+            }
+            i += 2
+        } else if lex.eq(args.list[i], b"-I") && i + 1 < args.list.len {
             ok = load.include(&(*c).p, args.list[i + 1])!
             i += 2
         } else if lex.eq(args.list[i], b"-o") && i + 1 < args.list.len {
@@ -137,25 +194,15 @@ fn run(c: *mut Ctx): !i32 {
         report_ir(c, &g)
         return 1
     }
-    let mut cg = x64.Cg.new(&(*c).a, &g)!
-    let mut img: []u8 = b""
-    ok = x64.gen(&cg) or {
-        if err != x64.E_X64 {
-            return error(err)
-        }
-        (*c).e.lit(b"error: ")
-        (*c).e.lit(x64.message(&cg))
-        (*c).e.nl()
-        return 1
+    let mut img: []u8 // (not `= b""`: read-only bytes, C8.1, make &img a *[]u8)
+    let mut r = 0
+    if target == 2 {
+        r = build_rv64(c, &g, &img)!
+    } else {
+        r = build_x64(c, &g, &img)!
     }
-    img = x64.image(&cg) or {
-        if err != x64.E_X64 {
-            return error(err)
-        }
-        (*c).e.lit(b"error: ")
-        (*c).e.lit(x64.message(&cg))
-        (*c).e.nl()
-        return 1
+    if r != 0 {
+        return r
     }
     let fd = os.open_write(args.arg_z(outi))!
     ok = os.write_all(fd, img)!

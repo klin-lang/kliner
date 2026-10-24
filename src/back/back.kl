@@ -1,0 +1,145 @@
+// module back — the target-independent part of the native backends
+// (x64, rv64; docs/07-rv64.md): which functions get code, the helper
+// and trap list, constant normalization, and the static ELF64 writer
+// (elf.kl). Nothing here emits machine code.
+module back
+import arena
+import ir
+
+// helpers emitted once after the functions (same set on every target)
+pub const H_MEMMOVE: i32 = 0
+pub const H_TRAP1: i32 = 1 // division by zero
+pub const H_TRAP2: i32 = 2 // end of a function without `return`
+pub const H_TRAP3: i32 = 3 // null fn value
+pub const H_TRAP4: i32 = 4 // stack overflow (SIGSEGV in the guard)
+pub const H_TRAP5: i32 = 5 // any other SIGSEGV
+pub const H_SEGV: i32 = 6 // the SIGSEGV handler
+pub const H_START: i32 = 7
+pub const NHELP: i32 = 8
+pub const NTRAP: i32 = 6
+
+// the _start stack (C14.2)
+pub const STACK: i64 = 1 << 30
+pub const ALTSTACK: i64 = 1 << 16
+pub const GUARD: i64 = 1 << 20
+
+pub fn roundup(v: i64, a: i64): i64 {
+    return (v + a - 1) / a * a
+}
+
+// k normalized to type t at compile time (as the interpreter's norm).
+pub fn cnorm(t: u8, k: i64): i64 {
+    if t == ir.I8 {
+        return cast(i64, cast(i8, k))
+    }
+    if t == ir.I16 {
+        return cast(i64, cast(i16, k))
+    }
+    if t == ir.I32 {
+        return cast(i64, cast(i32, k))
+    }
+    if t == ir.U8 {
+        return cast(i64, cast(u8, k))
+    }
+    if t == ir.U16 {
+        return cast(i64, cast(u16, k))
+    }
+    if t == ir.U32 {
+        return cast(i64, cast(u32, k))
+    }
+    return k
+}
+
+// Is instruction at + 1 the label `lab` (a jump there falls through)?
+pub fn next_is(g: *mut ir.Prog, f: ir.Func, at: i32, lab: i32): bool {
+    let mut j = at + 1
+    while j < f.end && (*g).ins[j].op == ir.Op.Label {
+        if (*g).ins[j].a == lab {
+            return true
+        }
+        j += 1
+    }
+    return false
+}
+
+// live[i] != 0: function i is reachable from main and $init (through
+// Call / FnRef) and has a body, so it gets code (C14.4).
+pub fn reach(a: *mut arena.Arena, g: *mut ir.Prog): ![]i32 {
+    let mut live = arena.alloc_i32(a, (*g).nfn + 1)!
+    let mut work = arena.alloc_i32(a, (*g).nfn + 2)!
+    let mut nw = 0
+    for i in 0..<(*g).nfn + 1 {
+        live[i] = 0
+    }
+    live[(*g).main] = 1
+    work[nw] = (*g).main
+    nw += 1
+    if live[(*g).init] == 0 {
+        live[(*g).init] = 1
+        work[nw] = (*g).init
+        nw += 1
+    }
+    while nw > 0 {
+        nw -= 1
+        let f = (*g).fns[work[nw]]
+        if f.kind != 0 {
+            continue
+        }
+        for j in f.start..<f.end {
+            let x = (*g).ins[j]
+            if (x.op == ir.Op.Call || x.op == ir.Op.FnRef) && live[x.a] == 0 {
+                live[x.a] = 1
+                work[nw] = x.a
+                nw += 1
+            }
+        }
+    }
+    for i in 0..<(*g).nfn + 1 {
+        if (*g).fns[i].kind != 0 {
+            live[i] = 0
+        }
+    }
+    return live
+}
+
+// Trap k's message (k = 1 .. NTRAP - 1), as kliner-run prints it.
+pub fn trap_text(k: i32): []u8 {
+    if k == 1 {
+        return b"kliner: trap: division by zero\n"
+    }
+    if k == 2 {
+        return b"kliner: trap: end of a function without `return`\n"
+    }
+    if k == 3 {
+        return b"kliner: trap: call through a null fn value\n"
+    }
+    if k == 4 {
+        return b"kliner: trap: stack overflow\n"
+    }
+    return b"kliner: trap: invalid memory access\n"
+}
+
+pub fn helper_name(h: i32): []u8 {
+    if h == H_MEMMOVE {
+        return b"kliner.memmove"
+    }
+    if h == H_TRAP1 {
+        return b"kliner.trap.div0"
+    }
+    if h == H_TRAP2 {
+        return b"kliner.trap.noreturn"
+    }
+    if h == H_TRAP3 {
+        return b"kliner.trap.nullfn"
+    }
+    if h == H_TRAP4 {
+        return b"kliner.trap.overflow"
+    }
+    if h == H_TRAP5 {
+        return b"kliner.trap.segv"
+    }
+    if h == H_SEGV {
+        return b"kliner.sigsegv"
+    }
+    return b"_start"
+}

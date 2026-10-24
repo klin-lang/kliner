@@ -10,34 +10,8 @@
 // into r0 … r(np-1). The result is in rax. rsp stays 16-aligned at a call.
 module x64
 import arena
+import back
 import ir
-
-fn roundup(v: i64, a: i64): i64 {
-    return (v + a - 1) / a * a
-}
-
-// k normalized to type t at compile time (as the interpreter's norm).
-fn cnorm(t: u8, k: i64): i64 {
-    if t == ir.I8 {
-        return cast(i64, cast(i8, k))
-    }
-    if t == ir.I16 {
-        return cast(i64, cast(i16, k))
-    }
-    if t == ir.I32 {
-        return cast(i64, cast(i32, k))
-    }
-    if t == ir.U8 {
-        return cast(i64, cast(u8, k))
-    }
-    if t == ir.U16 {
-        return cast(i64, cast(u16, k))
-    }
-    if t == ir.U32 {
-        return cast(i64, cast(u32, k))
-    }
-    return k
-}
 
 fn fail(c: *mut Cg, what: []u8): i32 {
     madd(c, (*(*c).g).fns[(*c).fi].name)
@@ -102,7 +76,7 @@ fn cmp_cc(op: ir.Op, sg: bool): i32 {
 // Division / remainder of rax by rcx at type t; result in rax.
 fn divrem(c: *mut Cg, rem: bool, t: u8) {
     rr_op(c, true, 0x85, RCX, RCX) // test rcx, rcx
-    jcc_help(c, CC_E, H_TRAP1)
+    jcc_help(c, CC_E, back.H_TRAP1)
     if ir.is_signed(t) {
         // b == -1: MIN / -1 would fault; the result is -a (div) or 0 (rem)
         rr_op(c, true, 0x83, 7, RCX) // cmp rcx, -1
@@ -161,25 +135,13 @@ fn shift(c: *mut Cg, left: bool, t: u8) {
 // Pushes the argument registers args[base .. base + n); the bytes reserved.
 fn push_args(c: *mut Cg, base: i32, n: i32): i64 {
     let g = (*c).g
-    let size = roundup(cast(i64, n) * 8, 16)
+    let size = back.roundup(cast(i64, n) * 8, 16)
     add_rsp(c, -size)
     for j in 0..<n {
         ldr(c, RAX, (*g).args[base + j])
         mem_op(c, 0, true, 0x89, RAX, RSP, cast(i64, j) * 8)
     }
     return size
-}
-
-// Is instruction at + 1 the label `lab` (a jump there falls through)?
-fn next_is(g: *mut ir.Prog, f: ir.Func, at: i32, lab: i32): bool {
-    let mut j = at + 1
-    while j < f.end && (*g).ins[j].op == ir.Op.Label {
-        if (*g).ins[j].a == lab {
-            return true
-        }
-        j += 1
-    }
-    return false
 }
 
 const SMALL: i64 = 64
@@ -289,7 +251,7 @@ fn gen_ins(c: *mut Cg, f: ir.Func, slots: i64, at: i32, x: ir.Ins): !i32 {
             (*c).lpos[f.lab + x.a] = (*c).n
         }
         ir.Op.Const {
-            mov_imm(c, RAX, cnorm(x.t, x.k))
+            mov_imm(c, RAX, back.cnorm(x.t, x.k))
             stv(c, x.d, RAX)
         }
         ir.Op.Slot {
@@ -396,7 +358,7 @@ fn gen_ins(c: *mut Cg, f: ir.Func, slots: i64, at: i32, x: ir.Ins): !i32 {
                 copy_small(c, x.k)
             } else {
                 mov_imm(c, RCX, x.k)
-                call_help(c, H_MEMMOVE)
+                call_help(c, back.H_MEMMOVE)
             }
         }
         ir.Op.Zero {
@@ -411,18 +373,18 @@ fn gen_ins(c: *mut Cg, f: ir.Func, slots: i64, at: i32, x: ir.Ins): !i32 {
             }
         }
         ir.Op.Jmp {
-            if !next_is(g, f, at, x.a) {
+            if !back.next_is(g, f, at, x.a) {
                 jmp_lab(c, f.lab + x.a)
             }
         }
         ir.Op.Br {
             ldr(c, RAX, x.a)
             rr_op(c, true, 0x85, RAX, RAX)
-            if next_is(g, f, at, x.b) {
+            if back.next_is(g, f, at, x.b) {
                 jcc_lab(c, CC_E, f.lab + x.c)
             } else {
                 jcc_lab(c, CC_NE, f.lab + x.b)
-                if !next_is(g, f, at, x.c) {
+                if !back.next_is(g, f, at, x.c) {
                     jmp_lab(c, f.lab + x.c)
                 }
             }
@@ -443,7 +405,7 @@ fn gen_ins(c: *mut Cg, f: ir.Func, slots: i64, at: i32, x: ir.Ins): !i32 {
             let size = push_args(c, x.b, x.c)
             ldr(c, R11, x.a)
             rr_op(c, true, 0x85, R11, R11) // test r11, r11
-            jcc_help(c, CC_E, H_TRAP3)
+            jcc_help(c, CC_E, back.H_TRAP3)
             rr_op(c, false, 0xff, 2, R11) // call r11
             add_rsp(c, size)
             if x.d >= 0 {
@@ -473,11 +435,11 @@ fn gen_ins(c: *mut Cg, f: ir.Func, slots: i64, at: i32, x: ir.Ins): !i32 {
         }
         ir.Op.Trap {
             if x.k == 1 {
-                jmp_help(c, H_TRAP1)
+                jmp_help(c, back.H_TRAP1)
             } else if x.k == 3 {
-                jmp_help(c, H_TRAP3)
+                jmp_help(c, back.H_TRAP3)
             } else {
-                jmp_help(c, H_TRAP2)
+                jmp_help(c, back.H_TRAP2)
             }
         }
     }
@@ -491,8 +453,8 @@ fn gen_fn(c: *mut Cg, fi: i32): !i32 {
     (*c).fi = fi
     room(c, 64 + 16 * f.np)!
     (*c).fpos[fi] = (*c).n
-    let rbytes = roundup(cast(i64, f.nr) * 8, 16)
-    let total = rbytes + roundup(f.frame, 16)
+    let rbytes = back.roundup(cast(i64, f.nr) * 8, 16)
+    let total = rbytes + back.roundup(f.frame, 16)
     if total > 0x7fff0000 {
         return error(fail(c, b"frame too large"))
     }
@@ -555,9 +517,6 @@ fn gen_trap(c: *mut Cg, k: i32) {
     syscall(c)
 }
 
-pub const STACK: i64 = 1 << 30
-pub const ALTSTACK: i64 = 1 << 16
-pub const GUARD: i64 = 1 << 20
 const MAP_STACK_FLAGS: i64 = 0x4022 // MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE
 const SA_FLAGS: i64 = 0x0c000004 // SA_ONSTACK | SA_RESTORER | SA_SIGINFO
 
@@ -569,9 +528,9 @@ fn gen_segv(c: *mut Cg) {
     mem_op(c, 0, true, 0x8b, RAX, RSI, 16) // mov rax, [rsi + 16]: si_addr
     rr_op(c, true, 0x29, R12, RAX) // sub rax, r12
     rr_op(c, true, 0x81, 7, RAX) // cmp rax, imm32
-    b4(c, ALTSTACK + GUARD)
-    jcc_help(c, CC_B, H_TRAP4)
-    jmp_help(c, H_TRAP5)
+    b4(c, back.ALTSTACK + back.GUARD)
+    jcc_help(c, CC_B, back.H_TRAP4)
+    jmp_help(c, back.H_TRAP5)
 }
 
 // _start: argc at [rsp], argv at rsp + 8. Switches to a 1 GiB mmap'd
@@ -585,7 +544,7 @@ fn gen_start(c: *mut Cg) {
     rr_op(c, false, 0x31, R12, R12)
     mov_imm(c, RAX, 9)
     rr_op(c, false, 0x31, RDI, RDI)
-    mov_imm(c, RSI, STACK)
+    mov_imm(c, RSI, back.STACK)
     mov_imm(c, RDX, 3)
     mov_imm(c, R10, MAP_STACK_FLAGS)
     mov_imm(c, R8, -1)
@@ -594,8 +553,8 @@ fn gen_start(c: *mut Cg) {
     rr_op(c, true, 0x85, RAX, RAX)
     let j1 = jcc32(c, CC_S) // mmap failed: stay on the kernel's stack
     rr_op(c, true, 0x89, RAX, R12) // mov r12, rax
-    mem_op(c, 0, true, 0x8d, RDI, R12, ALTSTACK) // mprotect(base + 64K, 1M, PROT_NONE)
-    mov_imm(c, RSI, GUARD)
+    mem_op(c, 0, true, 0x8d, RDI, R12, back.ALTSTACK) // mprotect(base + 64K, 1M, PROT_NONE)
+    mov_imm(c, RSI, back.GUARD)
     rr_op(c, false, 0x31, RDX, RDX)
     mov_imm(c, RAX, 10)
     syscall(c)
@@ -604,14 +563,14 @@ fn gen_start(c: *mut Cg) {
     mem_op(c, 0, true, 0x89, R12, RSP, 0)
     rr_op(c, false, 0x31, RAX, RAX)
     mem_op(c, 0, true, 0x89, RAX, RSP, 8)
-    mov_imm(c, RAX, ALTSTACK)
+    mov_imm(c, RAX, back.ALTSTACK)
     mem_op(c, 0, true, 0x89, RAX, RSP, 16)
     rr_op(c, true, 0x89, RSP, RDI)
     rr_op(c, false, 0x31, RSI, RSI)
     mov_imm(c, RAX, 131)
     syscall(c)
     // rt_sigaction(SIGSEGV, &{handler, flags, restorer, mask 0}, 0, 8)
-    lea_rip(c, RAX, FX_HELP, cast(i64, H_SEGV))
+    lea_rip(c, RAX, FX_HELP, cast(i64, back.H_SEGV))
     mem_op(c, 0, true, 0x89, RAX, RSP, 0)
     mem_op(c, 0, true, 0x89, RAX, RSP, 16)
     mov_imm(c, RAX, SA_FLAGS)
@@ -625,7 +584,7 @@ fn gen_start(c: *mut Cg) {
     mov_imm(c, RAX, 13)
     syscall(c)
     rr_op(c, true, 0x89, R12, RSP) // mov rsp, r12
-    add_rsp(c, STACK)
+    add_rsp(c, back.STACK)
     here32(c, j1)
     rr_op(c, true, 0x83, 4, RSP) // and rsp, -16
     b1(c, 0xf0)
@@ -662,61 +621,31 @@ pub fn gen(c: *mut Cg): !i32 {
         madd(c, b"no `main` function")
         return error(E_X64)
     }
-    trap_msg(c, 1, b"kliner: trap: division by zero\n")!
-    trap_msg(c, 2, b"kliner: trap: end of a function without `return`\n")!
-    trap_msg(c, 3, b"kliner: trap: call through a null fn value\n")!
-    trap_msg(c, 4, b"kliner: trap: stack overflow\n")!
-    trap_msg(c, 5, b"kliner: trap: invalid memory access\n")!
-    // only the functions reachable from main and $init (Call / FnRef)
-    let mut live = arena.alloc_i32((*c).a, (*g).nfn + 1)!
-    let mut work = arena.alloc_i32((*c).a, (*g).nfn + 2)!
-    let mut nw = 0
+    for k in 1..<back.NTRAP {
+        trap_msg(c, k, back.trap_text(k))!
+    }
+    // only the functions reachable from main and $init (C14.4)
+    let live = back.reach((*c).a, g)!
     for i in 0..<(*g).nfn + 1 {
-        live[i] = 0
-    }
-    live[(*g).main] = 1
-    work[nw] = (*g).main
-    nw += 1
-    if live[(*g).init] == 0 {
-        live[(*g).init] = 1
-        work[nw] = (*g).init
-        nw += 1
-    }
-    while nw > 0 {
-        nw -= 1
-        let f = (*g).fns[work[nw]]
-        if f.kind != 0 {
-            continue
-        }
-        for j in f.start..<f.end {
-            let x = (*g).ins[j]
-            if (x.op == ir.Op.Call || x.op == ir.Op.FnRef) && live[x.a] == 0 {
-                live[x.a] = 1
-                work[nw] = x.a
-                nw += 1
-            }
-        }
-    }
-    for i in 0..<(*g).nfn + 1 {
-        if live[i] != 0 && (*g).fns[i].kind == 0 {
+        if live[i] != 0 {
             gen_fn(c, i)!
         }
     }
     room(c, 4096)!
-    (*c).hpos[H_MEMMOVE] = (*c).n
+    (*c).hpos[back.H_MEMMOVE] = (*c).n
     gen_memmove(c)
-    (*c).hend[H_MEMMOVE] = (*c).n
-    for k in 1..<NTRAP {
+    (*c).hend[back.H_MEMMOVE] = (*c).n
+    for k in 1..<back.NTRAP {
         (*c).hpos[k] = (*c).n
         gen_trap(c, k)
         (*c).hend[k] = (*c).n
     }
-    (*c).hpos[H_SEGV] = (*c).n
+    (*c).hpos[back.H_SEGV] = (*c).n
     gen_segv(c)
-    (*c).hend[H_SEGV] = (*c).n
-    (*c).hpos[H_START] = (*c).n
+    (*c).hend[back.H_SEGV] = (*c).n
+    (*c).hpos[back.H_START] = (*c).n
     gen_start(c)
-    (*c).hend[H_START] = (*c).n
+    (*c).hend[back.H_START] = (*c).n
     for i in 0..<(*c).nf {
         let x = (*c).fix[i]
         let mut to = -1

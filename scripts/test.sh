@@ -211,7 +211,7 @@ if build kliner-parse tools/kliner-parse -I "$ROOT/src"; then
     # Same files through Klin's parser: identical stdout and exit code.
     # Expected differences, counted but not failures:
     #  - Kliner rejects string interpolation (exit 1 + note, Klin parses);
-    #  - rt/linux_x86_64/sys.kl: fns without a body in `module sys`
+    #  - rt/linux_x86_64/sys.kl, rt/linux_riscv64/sys.kl: fns without a body in `module sys`
     #    (Kliner parses, Klin: "expected `{`");
     #  - div_* goldens (tests/lex, tests/parse).
     # Files with `$fn` / `$name(...)` fail in both at the same `$`.
@@ -232,7 +232,7 @@ if build kliner-parse tools/kliner-parse -I "$ROOT/src"; then
                     if [ $a = 0 ] && [ $b = 1 ] && grep -q ': string interpolation is not supported by Kliner yet$' "$TMP/k.ast"; then
                         interp=$((interp + 1)); continue
                     fi
-                    case $f in */rt/linux_x86_64/sys.kl|*/tests/ir/only/unsup/lib/sys.kl) if [ $b = 0 ]; then sys=$((sys + 1)); continue; fi ;; esac
+                    case $f in */rt/linux_x86_64/sys.kl|*/rt/linux_riscv64/sys.kl|*/tests/ir/only/unsup/lib/sys.kl) if [ $b = 0 ]; then sys=$((sys + 1)); continue; fi ;; esac
                     bad=$((bad + 1))
                     echo "  differs: $f (exit klin $a, kliner $b)"
                     diff "$TMP/d.ast" "$TMP/k.ast" | head -6 | sed 's/^/    /'
@@ -277,7 +277,7 @@ if build kliner-check tools/kliner-check -I "$ROOT/src"; then
     #    `pick`, `async`, interpolation, `asm`, remote imports): exit 1
     #    with "... is not supported by Kliner yet";
     #  - `$fn` / `$name(...)` (C10): Kliner stops at the `$`, Klin expands;
-    #  - rt/linux_x86_64/sys.kl: fns without a body in `module sys`;
+    #  - rt/linux_x86_64/sys.kl, rt/linux_riscv64/sys.kl: fns without a body in `module sys`;
     #  - div_* goldens.
     # Klin's checker imports packages beyond the parser's (crypto, xml):
     # it builds with the checkout's .dart_tool/package_config.json
@@ -299,7 +299,7 @@ if build kliner-check tools/kliner-check -I "$ROOT/src"; then
                     if [ $a = $b ] && cmp -s "$TMP/d.chk" "$TMP/k.chk"; then continue; fi
                     if [ $b = 1 ] && grep -q 'not supported by Kliner yet' "$TMP/k.chk"; then uns=$((uns + 1)); continue; fi
                     if [ $b = 1 ] && grep -q 'unexpected character `\$`' "$TMP/k.chk"; then mac=$((mac + 1)); continue; fi
-                    case $f in */rt/linux_x86_64/sys.kl|*/tests/ir/only/unsup/lib/sys.kl) if [ $b = 0 ]; then sys=$((sys + 1)); continue; fi ;; esac
+                    case $f in */rt/linux_x86_64/sys.kl|*/rt/linux_riscv64/sys.kl|*/tests/ir/only/unsup/lib/sys.kl) if [ $b = 0 ]; then sys=$((sys + 1)); continue; fi ;; esac
                     bad=$((bad + 1))
                     echo "  differs: $f (exit klin $a, kliner $b)"
                     echo "    klin:   $(head -1 "$TMP/d.chk")"
@@ -414,7 +414,7 @@ if build kliner-build tools/kliner-build -I "$ROOT/src"; then
     RI="-I $ROOT/rt/linux_x86_64 -I $ROOT/rt -I $ROOT/src"
     NAT="$TMP/nat"
     mkdir -p "$NAT"
-    printf 'usage: kliner-build [-I DIR]... FILE.kl -o OUT\n' >"$TMP/kbusage.err"
+    printf 'usage: kliner-build [--target x64|rv64] [-I DIR]... FILE.kl -o OUT\n' >"$TMP/kbusage.err"
     check build-usage 2 "$TMP/empty" "$TMP/kbusage.err" -- "$KB" "$ROOT/tests/rt/hello/main.kl"
     nbuild() { # name file.kl: $NAT/name, or FAIL
         if "$KB" $RI "$2" -o "$NAT/$1" >"$TMP/nb.err" 2>&1 && [ -x "$NAT/$1" ]; then return 0; fi
@@ -524,6 +524,107 @@ if build kliner-build tools/kliner-build -I "$ROOT/src"; then
             if static_elf "$NAT/build1"; then echo "ok   native kliner-build: static ELF64"; pass=$((pass + 1));
             else echo "FAIL native kliner-build: not static"; fail=$((fail + 1)); fi
         fi
+    fi
+fi
+
+# --- stage 7: RV64 backend, run under qemu-riscv64 (user mode) ----------
+# Skipped without qemu-riscv64 (QEMU_RISCV64 overrides the command).
+QEMU=${QEMU_RISCV64:-qemu-riscv64}
+if [ -z "${KB:-}" ]; then
+    :
+elif ! command -v "$QEMU" >/dev/null 2>&1; then
+    echo "skip rv64 (no $QEMU; install qemu-user)"
+else
+    RV="-I $ROOT/rt/linux_riscv64 -I $ROOT/rt -I $ROOT/src"
+    RVD="$TMP/rv"
+    mkdir -p "$RVD"
+    rbuild() { # name file.kl: $RVD/name, or FAIL
+        if "$KB" --target rv64 $RV "$2" -o "$RVD/$1" >"$TMP/rb.err" 2>&1 && [ -x "$RVD/$1" ]; then return 0; fi
+        echo "FAIL rv64 build $1"; sed 's/^/  /' "$TMP/rb.err"; fail=$((fail + 1)); return 1
+    }
+    if rbuild hello "$ROOT/tests/rt/hello/main.kl"; then
+        if command -v readelf >/dev/null 2>&1; then
+            if static_elf "$RVD/hello" && readelf -h "$RVD/hello" | grep -q 'RISC-V'; then echo "ok   rv64 hello: static ELF64 RISC-V"; pass=$((pass + 1));
+            else echo "FAIL rv64 hello: not a static RISC-V executable"; fail=$((fail + 1)); fi
+        fi
+        [ -f "$TMP/hello.out" ] && check rv64-hello 3 "$TMP/hello.out" "$TMP/hello.err" -- "$QEMU" "$RVD/hello"
+    fi
+    [ -f "$TMP/alloc.out" ] && rbuild alloc "$ROOT/tests/rt/alloc/main.kl" && check rv64-alloc 0 "$TMP/alloc.out" "$TMP/empty" -- "$QEMU" "$RVD/alloc"
+    [ -f "$TMP/args.out" ] && rbuild args "$ROOT/tests/rt/args/main.kl" && check rv64-args 0 "$TMP/args.out" "$TMP/empty" -- "$QEMU" "$RVD/args" "a b" "" "zażółć" x
+    if [ -f "$TMP/cat.err" ] && rbuild cat "$ROOT/tests/rt/cat/main.kl"; then
+        check rv64-cat 0 "$TMP/in.txt" "$TMP/cat.err" -- "$QEMU" "$RVD/cat" "$TMP/in.txt"
+        check rv64-cat-big 0 "$TMP/big.txt" "$TMP/big.err" -- "$QEMU" "$RVD/cat" "$TMP/big.txt"
+        rm -f "$TMP/copy4"
+        check rv64-cat-write 0 "$TMP/empty" "$TMP/cat.err" -- "$QEMU" "$RVD/cat" "$TMP/in.txt" "$TMP/copy4"
+        if cmp -s "$TMP/in.txt" "$TMP/copy4"; then echo "ok   rv64-cat-copy"; pass=$((pass + 1)); else echo "FAIL rv64-cat-copy"; fail=$((fail + 1)); fi
+        check rv64-cat-enoent 1 "$TMP/empty" "$TMP/enoent.err" -- "$QEMU" "$RVD/cat" "$TMP/no/such/file"
+    fi
+    for d in "$ROOT"/tests/ir/*/ "$ROOT"/tests/x64/*/; do
+        n=$(basename "$d")
+        [ -f "$d/main.out" ] || continue
+        rbuild "t-$n" "$d/main.kl" || continue
+        "$QEMU" "$RVD/t-$n" x y >"$TMP/rv.out" 2>&1 </dev/null; echo "exit $?" >>"$TMP/rv.out"
+        if cmp -s "$TMP/rv.out" "$d/main.out"; then echo "ok   rv64 $n = golden"; pass=$((pass + 1));
+        else echo "FAIL rv64 $n = golden"; diff "$d/main.out" "$TMP/rv.out" | head -20 | sed 's/^/  /'; fail=$((fail + 1)); fi
+    done
+    if rbuild trap "$ROOT/tests/ir/only/trap/main.kl"; then
+        check rv64-trap 134 "$TMP/trap.out" "$TMP/ntrap.err" -- "$QEMU" "$RVD/trap"
+    fi
+    if rbuild deep "$ROOT/tests/ir/only/deep/main.kl"; then
+        check rv64-deep 134 "$TMP/empty" "$TMP/ndeep.err" -- "$QEMU" "$RVD/deep"
+    fi
+    # Kliner's tools built for rv64 = their Klin-built binaries (x86-64)
+    rv_self() { # label rv-binary klin-binary files...
+        label=$1 nb=$2 kb=$3; shift 3
+        bad=0 nf=0
+        for f in "$@"; do
+            nf=$((nf + 1))
+            "$kb" $NFL "$f" >"$TMP/s1" 2>&1; a=$?
+            "$QEMU" "$nb" $NFL "$f" >"$TMP/s2" 2>&1; b=$?
+            if [ $a != $b ] || ! cmp -s "$TMP/s1" "$TMP/s2"; then bad=$((bad + 1)); echo "  differs: $f"; fi
+        done
+        if [ $bad = 0 ]; then echo "ok   rv64: $label ($nf files)"; pass=$((pass + 1));
+        else echo "FAIL rv64: $label ($bad of $nf files differ)"; fail=$((fail + 1)); fi
+    }
+    NFL=
+    [ -n "${LEX:-}" ] && rbuild lex "$ROOT/tools/kliner-lex/main.kl" && rv_self "kliner-lex = Klin build" "$RVD/lex" "$LEX" $SRCS "$ROOT"/tests/lex/*.kl
+    [ -n "${PARSE:-}" ] && rbuild parse "$ROOT/tools/kliner-parse/main.kl" && rv_self "kliner-parse = Klin build" "$RVD/parse" "$PARSE" $SRCS "$ROOT"/tests/parse/*.kl
+    if [ -n "${CHECK:-}" ] && rbuild check "$ROOT/tools/kliner-check/main.kl"; then
+        rv_self "kliner-check = Klin build (goldens)" "$RVD/check" "$CHECK" $(ls "$ROOT"/tests/check/*.kl "$ROOT"/tests/check/klin/*.kl "$ROOT"/tests/check/*/main.kl | grep -v lib_)
+        NFL="-I $ROOT/src -I $ROOT/rt -I $ROOT/rt/bootstrap"
+        rv_self "kliner-check = Klin build (programs)" "$RVD/check" "$CHECK" "$ROOT"/tools/*/main.kl "$ROOT"/tests/rt/*/main.kl
+        NFL=
+    fi
+    if [ -n "${IRD:-}" ] && rbuild ir "$ROOT/tools/kliner-ir/main.kl"; then
+        NFL=$RI
+        rv_self "kliner-ir = Klin build" "$RVD/ir" "$IRD" "$ROOT"/tools/*/main.kl "$ROOT"/tests/ir/*/main.kl
+        NFL=
+    fi
+    if rbuild run "$ROOT/tools/kliner-run/main.kl"; then
+        # kliner-run on rv64 runs programs against the rv64 runtime
+        bad=0
+        for d in "$ROOT"/tests/ir/*/; do
+            [ -f "$d/main.out" ] || continue
+            "$QEMU" "$RVD/run" $RV "$d/main.kl" x y >"$TMP/s1" 2>&1 </dev/null; echo "exit $?" >>"$TMP/s1"
+            cmp -s "$TMP/s1" "$d/main.out" || { bad=$((bad + 1)); echo "  differs: $d"; }
+        done
+        if [ $bad = 0 ]; then echo "ok   rv64: kliner-run (tests/ir goldens)"; pass=$((pass + 1));
+        else echo "FAIL rv64: kliner-run ($bad differ)"; fail=$((fail + 1)); fi
+    fi
+    # cross fixpoint: kliner-build for rv64 rebuilds itself under qemu
+    # byte for byte, = the one the native x86-64 kliner-build makes
+    if rbuild build1 "$ROOT/tools/kliner-build/main.kl"; then
+        "$QEMU" "$RVD/build1" $RV "$ROOT/tools/kliner-build/main.kl" -o "$RVD/build2" >"$TMP/rb.err" 2>&1
+        ok7=1
+        cmp -s "$RVD/build1" "$RVD/build2" || ok7=0
+        if [ -x "$NAT/build1" ]; then
+            "$NAT/build1" --target rv64 $RV "$ROOT/tools/kliner-build/main.kl" -o "$RVD/build3" >>"$TMP/rb.err" 2>&1
+            cmp -s "$RVD/build1" "$RVD/build3" || ok7=0
+            "$QEMU" "$RVD/build1" --target x64 $RI "$ROOT/tools/kliner-build/main.kl" -o "$RVD/buildx" >>"$TMP/rb.err" 2>&1
+            cmp -s "$NAT/build1" "$RVD/buildx" || ok7=0
+        fi
+        if [ $ok7 = 1 ]; then echo "ok   rv64: cross fixpoint, kliner-build on rv64 = itself = native x64 output ($(wc -c <"$RVD/build1" | tr -d ' ') bytes)"; pass=$((pass + 1));
+        else echo "FAIL rv64: cross fixpoint differs"; sed 's/^/  /' "$TMP/rb.err"; fail=$((fail + 1)); fi
     fi
 fi
 

@@ -1,0 +1,31 @@
+// module sys — Kliner, Linux RISC-V 64 (stage 7, docs/07-rv64.md). NOT
+// valid Klin: the body-less `pub fn call6` is an intrinsic that only
+// Kliner accepts in module `sys` (docs/02-core-subset.md C6). Same API
+// as rt/linux_x86_64/sys.kl; the numbers are the generic Linux table
+// (asm-generic/unistd.h), shared with ARM64.
+module sys
+
+// Raw syscall (`ecall`: a7 = nr, a0 .. a5; result in a0).
+pub fn call6(nr: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64): i64
+
+// Plain Klin (D17), same as rt/bootstrap/sys.kl.
+pub fn addr_u8(b: []u8): i64 { return cast(i64, &b[0]) }
+
+pub const NR_READ: i64 = 63
+pub const NR_WRITE: i64 = 64
+pub const NR_CLOSE: i64 = 57
+pub const NR_FSTAT: i64 = 80
+pub const NR_LSEEK: i64 = 62
+pub const NR_MMAP: i64 = 222
+pub const NR_MUNMAP: i64 = 215
+pub const NR_GETCWD: i64 = 17
+pub const NR_GETDENTS64: i64 = 61
+pub const NR_EXIT_GROUP: i64 = 94
+pub const NR_OPENAT: i64 = 56
+pub const NR_NEWFSTATAT: i64 = 79
+pub const NR_MEMFD_CREATE: i64 = 279
+
+// The target (kliner-build's default --target, C15): 1 x86-64, 2 RV64.
+pub const ARCH: i32 = 2
+// Offset of st_mode (u32) in the generic `struct stat` (144 bytes).
+pub const STAT_MODE: i32 = 16
