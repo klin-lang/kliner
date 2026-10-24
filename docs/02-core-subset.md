@@ -11,12 +11,13 @@ Two questions:
 2. **What is the minimal runtime** on Linux syscalls?
 
 Basis: [klin-lang/klin](https://github.com/klin-lang/klin) main at
-`824e4af` (2026-10-24; the first probes were on `757b782`, Klin 0.1.4) —
-`docs/` (decisions D1–D18), `lib/` (lexer, parser, checker, types),
+`d7625f1` (2026-10-24; earlier probes on `824e4af` and `757b782`, Klin 0.1.4) —
+`docs/` (decisions D1–D19), `lib/` (lexer, parser, checker, types),
 `stdlib/`, `test/`, `examples/`. Every "bootstrap risk" below marked
 *probed* was checked by compiling a small program with that Klin
 (Dart 3.13.7 → C → gcc); the C6 and C7 snippets were re-probed with
-`824e4af` on 2026-10-24.
+`824e4af` on 2026-10-24, and `rt/` builds and passes `scripts/test.sh`
+on `d7625f1`.
 
 Status: C1–C4 and C6 **PROPOSED**. The five stage-1 questions are
 **DECIDED (2026-10-23)** — see [C7](#c7-decisions--decided-2026-10-23).
@@ -29,8 +30,9 @@ sync with Klin main are in
 The Klin changes the compiler source relies on are **merged into Klin
 main**: [#351](https://github.com/klin-lang/klin/pull/351) to
 [#356](https://github.com/klin-lang/klin/pull/356) (table in C5).
-[#357](https://github.com/klin-lang/klin/pull/357) is **in progress**
-(open, not merged); nothing in this document depends on it.
+[#357](https://github.com/klin-lang/klin/pull/357) (`a7e49ac`) and
+[#358](https://github.com/klin-lang/klin/pull/358) (`d7625f1`, G13, D19)
+are merged too; the runtime in `rt/` uses #358.
 
 ---
 
@@ -58,7 +60,7 @@ and probed OK.
 
 | Feature | Klin form | Bootstrap risk | Notes |
 |---|---|---|---|
-| Integers | `i8`…`i64`, `u8`…`u64`, `usize`/`isize`, `int` = `i32` | low | Widths matter (K8). `u64` literals and shifts probed OK. A literal, unary `-` / `~` on it, and an integer constant expression take the expected type (D12, C8.3): `f(-1)` for an `i64` param, `r >= -4095` with `r: i64`, `let x: i64 = 1 << 40`. An out-of-range literal is a compile error (`let x: u8 = 300`, D12, C8.2). With no expected type it is still `i32` (`let x = 1 << 40` → shift wider than `i32`). `match` / `pick` arms do not adopt the type yet (`let x: u8 = match … { 0 { 1 + 2 } … }` → mismatch; #357, in progress). `xs.len` is `i32` |
+| Integers | `i8`…`i64`, `u8`…`u64`, `usize`/`isize`, `int` = `i32` | low | Widths matter (K8). `u64` literals and shifts probed OK. A literal, unary `-` / `~` on it, and an integer constant expression take the expected type (D12, C8.3): `f(-1)` for an `i64` param, `r >= -4095` with `r: i64`, `let x: i64 = 1 << 40`. An out-of-range literal is a compile error (`let x: u8 = 300`, D12, C8.2). With no expected type it is still `i32` (`let x = 1 << 40` → shift wider than `i32`). `match` / `pick` arms adopt it too (`let x: u8 = match k { 0 { 1 + 2 } else { 5 } }`, #357). `xs.len` is `i32` |
 | `bool` | `true` / `false`; `if` wants `bool` | low | No numeric truthiness |
 | Literals | `0xFF`, `0b1010`, `0o755`, `1_000`, `'A'` | low | Char literal is an integer — the lexer lives on these. An array literal takes the element type from context: `let a: [2]u8 = [65, 66]` (D12) |
 | Numeric `cast` | `cast(i64, x)`, `cast(u8, 300)` | low | No implicit widen/narrow — good for IR widths |
@@ -77,7 +79,7 @@ and probed OK.
 | `$fn` generics | `$fn vec(name: name, T: type) { struct $name { data: [8]$T … } }`, `$vec(VecI32, i32)` | medium | Probed OK. Parameters are spliced with `$` (`$T`, `$name`). A free `fn` inside the body is declared once per expansion → `redeclaration of function` on the second `$vec(…)`; use methods on `$name`. Risk: error messages inside expansions. Use only for a few container shapes |
 | Function pointers | `fn(T): R`, no capture | low | `h.cb(1)` calls a function field (D16, G7); a method of the same name is an `ambiguous call` error |
 | Destructuring / multi-assign | `let { x, y } = p`, `a, b = b, a` | low | Optional; lowers to plain moves. Array destructuring is in C3 |
-| Byte-string literal | `b"fn"` of type `[]u8` | low | Merged in #351 (G5, D10). Keyword table, messages, paths: `b"fn"`, `b"error: "`. Rules: `.len` counts bytes, no implicit trailing NUL (`b"/proc/self/cmdline\0"` has len 19); escapes `\n \t \\ \" \$ \0`; `\0` is one NUL byte, not octal (`b"\00"` = NUL + `'0'`); no interpolation. Bytes are read-only (C8.1): a direct write, a write through an immutable binding and a write through a `[]u8` param are checker errors; a write through a mutable place (`let mut s = b"fn"; s[0] = 1`) compiles and crashes (UB). Type-level check: #357 (in progress) |
+| Byte-string literal | `b"fn"` of type `[]u8` | low | Merged in #351 (G5, D10). Keyword table, messages, paths: `b"fn"`, `b"error: "`. Rules: `.len` counts bytes, no implicit trailing NUL (`b"/proc/self/cmdline\0"` has len 19); escapes `\n \t \\ \" \$ \0`; `\0` is one NUL byte, not octal (`b"\00"` = NUL + `'0'`); no interpolation. Bytes are read-only (C8.1): a direct write, a write through an immutable binding and a write through a `[]u8` param are checker errors; since #357 binding or assigning `b"…"` to a `let mut` slice is a checker error too (`let mut s = b"fn"`, `s = b"ab"`). Still UB: bytes that reach a mutable binding through a parameter or a return (`let mut t = id(b"fn"); t[0] = 1` compiles and crashes) |
 | Module-level `const` | `const PAGE: i64 = 4096` | low | Merged in #351, extended in #352–#353 (G8, D11). `pub? const Name: Type = expr`, top level only. Types: integer prims, `bool`, `[]u8`. An integer initializer is an integer constant expression (literals, unary `-` / `~`, `+ - * / % << >> & \| ^`, other constants, `mod.NAME`); overflow is an error, not a wrap. Valid as an `[N]T` length (`[BUF]u8`). Imported as `mod.NAME` (`os.AT_FDCWD`). Immutable: `NAME = …` and `KW[0] = …` are errors; a local shadows a const |
 | Module-level `let` / `let mut` | `let mut hits: i32`, `pub let mut n: i32 = 1` | low | Merged in #356 (D11). Type required; the initializer is a constant expression or omitted (zeroed); private = `static` in C; another module writes only a `pub let mut`. **Not used by the compiler source** while C7.3 stands — option in C9.1 (PROPOSED) |
 | Strings for the compiler | `[]u8`, subslices, `i32` offsets in tables | low | All source text, identifiers and output buffers are `[]u8`; literals are `b"…"`; a token's text is `src[start:start + len]` (G6). `str` is not used in compiler code |
@@ -119,7 +121,7 @@ stage2 == stage3 easier: no pointer values end up in output.
 | `fmt.write`, `time`, `math`, `slice`, `slice_alloc` (stdlib) | Rewritten as Kliner stdlib on syscalls (K6) |
 | `async fn` / `.await` | Needs an executor; not needed for the compiler |
 | `volatile` | MCU-oriented; harmless to add later |
-| Destructuring of arrays `let [a, b] = xs` | Optional sugar. From an array variable or literal on Klin main; from a call (`let [x, y] = pair()`) only with #357 (in progress) |
+| Destructuring of arrays `let [a, b] = xs` | Optional sugar. From an array variable or literal on Klin main; and from a call (`let [x, y] = pair()`, #357) |
 | `@[cexport]`, `--emit-h` | Only with C interop (K7) |
 
 ---
@@ -144,7 +146,7 @@ Kliner reports a clear error, e.g.
 ## C5. Gaps in Klin found by probes
 
 These mattered because the compiler source must build with current Klin.
-All of G1–G12 are **fixed on Klin main** (`824e4af`, checked 2026-10-24
+All of G1–G13 are **fixed on Klin main** (`d7625f1`, checked 2026-10-24
 with `git log` and probes); the workarounds are gone from this document.
 The "was" column is the result on `757b782`.
 
@@ -162,25 +164,18 @@ The "was" column is the result on `757b782`.
 | G10 | no `argc` / `argv` | `main()` takes no arguments | `fn main(args: []str)`, `args.len` = `argc` including `argv[0]` (D18). Elements are `str` — see C9.2 | #355 `824e4af` |
 | G11 | `(*c).err.lit(b"x")`; `&(*c).err` | `mutating method requires a mutable variable`; `*Out`, not `*mut Out` | A `mut` method accepts any mutable place, through `*mut` too; `&place` is `*mut T` on a mutable place (D5) | #352 `eccb0e1` |
 | G12 | `let w = a()!` with `a(): !i64` inside `fn f(): !i32` | C error: `klin_res_i64` from a `klin_res_i32` function | Builds; test `test/propagate_cross.kl` | #351 `76e1eb9` (`d3394e4`) |
+| G13 | `let p = cast(*mut [8]u8, addr)` then `(*p)[:]` / `(*p)[0:n]` | Passes the checker, broken C (`uint8_t *` from `uint8_t`; struct element: `invalid operands to binary +`) | `(*p)[:]`, `[a:b]`, `[a:]`, `[:b]`, `(*p)[i]` for every slice element type; `*mut [N]T` is a mutable place, `*[N]T` immutable (D19). Probed with `u8`, a struct and `[]u8` elements | #358 `d7625f1` |
 | — | `[65, 66]` as `[2]u8` initializer | typed as `[2]i32` | Takes the element type from context (D12) | #353 `b7e8894` |
 | — | `const X: u8 = 300`, `let x: i64 = -1`, `1 << 40` as `i64` | silent wrap; `-1` / `~7` / `1 << 40` are `i32` | Range error; unary `-` / `~` and constant expressions take the expected type (D12; C8.2, C8.3) | #352 `eccb0e1`, #353 `b7e8894`, #354 `db6bd2e` |
 
-Still open on Klin main (probed on `824e4af`), none blocking:
+Still open on Klin main (probed on `d7625f1`), none blocking:
 
 - A free `fn` inside a `$fn` body is declared once per expansion →
   `redeclaration of function` on the second expansion (use methods).
 - An `or { }` block must end in a value (`or { return }` is an error).
 - `str` cannot be measured, indexed or cast to an integer (C9.2).
-- **G13:** a subslice of an array reached through a pointer —
-  `let p = cast(*mut [8]u8, addr)` then `(*p)[:]` or `(*p)[0:n]` —
-  passes the checker and emits broken C (`uint8_t *` initialized from
-  `uint8_t`; with a struct element, `invalid operands to binary +`).
-  Not reported to Klin yet. Workaround: a `sys.slice_*` per element type
-  (C6 `arena`).
-- *Klin #357 (in progress, open):* `match` / `pick` arms adopt the
-  expected type, `let [x, y] = pair()`, `b"..."` read-only on a mutable
-  `[]u8` local (C8.1), constant folding in `puts` / `printf`, indexing in
-  `async fn`, `pick` / `match` of `[0]T` rejected.
+- `b"…"` reaching a mutable binding through a parameter or a return is
+  still UB (C8.1).
 
 ---
 
@@ -204,7 +199,7 @@ rt/
   linux_arm64/sys.kl    module sys     later (generic numbers)
   linux_rv64/sys.kl     module sys     later (generic numbers)
   bootstrap/sys.kl      module sys     Klin only: same API over libc (`@[cimport]` + small shim)
-  bootstrap/shim.c      klrt_syscall6, klrt_slice_u8 … (linked by `@[link]`, bootstrap only;
+  bootstrap/shim.c      klrt_syscall6 only (linked by `@[link]`, bootstrap only;
                         may depend on Klin's C layout of []T — decided, C7.5)
 ```
 
@@ -256,11 +251,6 @@ pub const NR_MMAP: i64 = 9
 pub const NR_MUNMAP: i64 = 11
 pub const NR_EXIT_GROUP: i64 = 231
 
-// Raw memory → slice. Kliner: intrinsic. Bootstrap: shim.
-pub fn slice_u8(addr: i64, len: i64): []u8
-pub fn slice_i32(addr: i64, len: i64): []i32
-pub fn slice_i64(addr: i64, len: i64): []i64
-
 // Slice → address, for syscall arguments (buffers, paths).
 // Part of the runtime API — DECIDED (C8.4).
 pub fn addr_u8(b: []u8): i64
@@ -272,9 +262,6 @@ pub fn addr_u8(b: []u8): i64
 @[cimport, codename("klrt_syscall6")]
 pub fn call6(nr: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64): i64
 
-@[cimport, codename("klrt_slice_u8")]
-pub fn slice_u8(addr: i64, len: i64): []u8
-
 // Plain Klin since the pointer → integer cast (G9, D17). `&b[0]` is
 // `b.ptr`: no bounds check, so an empty slice gives its pointer too.
 pub fn addr_u8(b: []u8): i64 { return cast(i64, &b[0]) }
@@ -282,11 +269,11 @@ pub fn addr_u8(b: []u8): i64 { return cast(i64, &b[0]) }
 
 Kliner may compile the same body (it needs the pointer → integer cast
 anyway) or keep `addr_u8` as an intrinsic — either way the API is C8.4.
-`slice_u8` / `slice_i32` / `slice_i64` stay in the shim: there is no
-pointer → slice conversion in Klin.
-
-`shim.c` declares its own `typedef struct { uint8_t *ptr; size_t len; }`
-with Klin's layout of `[]u8` (C7.5) and calls libc `syscall(2)`.
+Address → slice needs no `sys` function since klin #358 (D19): `cast`
+the address to `*mut [MAX_LEN]T` and take `(*p)[:n]` (C6 `arena`). The
+shim is one function, `klrt_syscall6`, a wrapper around libc
+`syscall(2)`; C7.5 (shim may rely on Klin's C layout of `[]T`) is no
+longer used by it.
 
 Flag constants (`AT_FDCWD`, `O_*`, `SEEK_*`, `PROT_*`, `MAP_*`) are
 `const` too. They are the same on all three targets, so they live in the
@@ -398,8 +385,7 @@ pub struct Args {
 
 Callers pass a subslice for a range: `os.write_all(fd, buf[off:off + n])`
 (G6, D15). `args.list.len` is the count, `args.list[0]` the program name.
-The `[][]u8` itself comes from the arena, so it needs the per-type
-`sys.slice_*` described under `arena` (G13).
+The `[][]u8` itself comes from the arena (`arena.alloc_slices_u8`).
 
 ### `arena` — bump allocator first
 
@@ -417,6 +403,8 @@ pub fn Arena.new(cap: i64): !Arena           // one mmap(PROT_READ|PROT_WRITE, M
 pub fn alloc_u8(a: *mut Arena, n: i32): ![]u8     // 8-byte aligned, zeroed; ENOMEM (12) when full
 pub fn alloc_i32(a: *mut Arena, n: i32): ![]i32
 pub fn alloc_i64(a: *mut Arena, n: i32): ![]i64
+pub fn alloc_slices_u8(a: *mut Arena, n: i32): ![][]u8     // for os.Args
+pub fn alloc_addr(a: *mut Arena, size: i64): !i64  // raw zeroed block, for typed allocators
 // pub fn alloc_tok(a: *mut Arena, n: i32): ![]Token — one per table type, declared next to that type
 pub fn mark(a: *mut Arena): i64
 pub fn reset(a: *mut Arena, m: i64)          // zeroes [m, used), then used = m (DECIDED, C8.4)
@@ -424,11 +412,17 @@ pub fn free_all(a: *mut Arena)               // munmap
 ```
 
 `alloc_tok` stands for one allocator per table element type (`[]Token`,
-`[]Node`, …, G3). Klin has no pointer → slice conversion, so each needs
-a `sys.slice_*` for that element type (shim in bootstrap, intrinsic in
-Kliner), like `slice_u8`. The pure-Klin route — `cast` the address to
-`*mut [MAX]Token` and take `(*p)[0:n]` — passes the checker but emits
-broken C on `824e4af` (G13, C5). Free functions on `*mut Arena` here,
+`[]Node`, …, G3), plain Klin since #358 (D19, G13 fixed):
+
+```klin
+pub fn alloc_tok(a: *mut arena.Arena, n: i32): ![]Token {
+    let p = cast(*mut [arena.MAX_LEN]Token, arena.alloc_addr(a, cast(i64, n) * 12)!)
+    return (*p)[:n]
+}
+```
+
+`MAX_LEN = 0x7fffffff` (`.len` is `i32`) is only the bound of the array
+type; no memory of that size exists. Free functions on `*mut Arena` here,
 because the arena is passed around as a pointer; a `mut` method works
 too (`(*c).arena.alloc_u8(n)`, G11).
 
@@ -495,12 +489,13 @@ D6), then `o.fd = 1`.
 
 ### Intrinsics Kliner must provide
 
-The complete list of things the core cannot express (stage 4):
+The complete list of things the core cannot express (stage 4). Address →
+slice is core Klin since D19 (`cast(*mut [N]T, addr)`, `(*p)[:n]`): Kliner
+must support that cast and the subslice, not an intrinsic.
 
 | Intrinsic | Lowers to |
 |---|---|
 | `sys.call6` | `syscall` (x86-64), `svc #0` (ARM64), `ecall` (RV64) |
-| `sys.slice_u8/i32/i64(addr, len)` | build `{ptr, len}` — no code |
 | `sys.addr_u8(b)` | `b.ptr` as an integer — no code (or the Klin body above, D17) |
 | `_start` | emitted, not declared |
 
@@ -581,12 +576,13 @@ Marek. C1–C4 and C6 as a whole stay PROPOSED.
    checker rejects a direct write (`b"fn"[0] = 1`, `KW[0] = 1`), and
    since #353 / #354 also a write through an immutable binding
    (`let s = b"fn"; s[0] = 1`) or a `[]u8` parameter (D5, D10). A write
-   through a mutable place (`let mut s = b"fn"; s[0] = 1`, or
-   `let mut t = param` then `t[0] = 1`) is undefined behavior — probed on
-   `824e4af`: compiles and crashes (the bytes are in read-only memory).
-   Type-level enforcement comes later; *klin #357 (in progress, not
-   merged)* rejects binding `b"..."` to a mutable `[]u8` local, but not a
-   parameter, a return or a field. Compiler code copies into a `[N]u8`
+   through a mutable place is undefined behavior. *Merged: klin #357
+   (`a7e49ac`)* makes the direct cases checker errors: `let mut s = b"fn"`
+   and `s = b"ab"` on a `let mut` slice ("cannot bind read-only bytes to
+   a mutable slice"). Still UB, probed on `d7625f1`: bytes that reach a
+   mutable binding through a parameter or a return
+   (`let mut t = id(b"fn"); t[0] = 1` compiles and crashes; the bytes
+   are in read-only memory). Compiler code copies into a `[N]u8`
    or an arena buffer before writing.
 2. **Out-of-range integer literals are a compile error** in `const` and
    `let` (`const X: u8 = 300`, `let y: i8 = 200`). *Landed: klin #352
@@ -597,7 +593,7 @@ Marek. C1–C4 and C6 as a whole stay PROPOSED.
    `cast(i64, -1)`. *Landed: klin #353 / #354 (D12)*, together with
    integer constant expressions (`let x: i64 = 1 << 40`). The casts are
    removed from the examples (C6 `check`, `Arena.new`, alignment).
-   `match` / `pick` arms adopt the type only with #357 (in progress).
+   `match` / `pick` arms adopt the type too (#357, merged).
 4. **`sys.addr_u8(b: []u8): i64` and zeroing `arena.reset`** are part of
    the runtime API (C6). `addr_u8` is a Kliner intrinsic and a shim
    function in bootstrap; `reset(a, m)` zeroes `[m, used)` so every
@@ -639,6 +635,6 @@ changes C7 until he decides.
 3. **Data model:** slices of structs (`toks: []Token`) instead of
    struct-of-arrays, sub-structs by value in `Ctx` with `mut` methods
    (C2 Data model, C6 `out`, C7 example). This document now uses that
-   form. Allocating a `[]Token` in the arena needs a `sys.slice_*` per
-   element type until G13 is fixed (C6 `arena`); struct-of-arrays
-   (`[]u8` / `[]i32` columns) avoids that and stays a valid fallback.
+   form. Allocating a `[]Token` in the arena is plain Klin since G13 is
+   fixed (#358, C6 `arena`); struct-of-arrays (`[]u8` / `[]i32` columns)
+   stays a valid fallback.

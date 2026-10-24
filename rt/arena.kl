@@ -24,7 +24,7 @@ pub fn Arena.new(cap: i64): !Arena {
 // Raw block of `size` bytes: address, 8-byte aligned, zeroed (fresh mmap
 // pages are zero; reset clears reused memory). ENOMEM when full.
 // Building block for typed allocators, e.g. a per-table alloc_tok:
-//   sys.slice_tok(arena.alloc_addr(a, n * 12)!, n)
+//   cast(*mut [arena.MAX_LEN]Token, arena.alloc_addr(a, n * 12)!) then (*p)[:n]
 pub fn alloc_addr(a: *mut Arena, size: i64): !i64 {
     if size < 0 {
         return error(os.EINVAL)
@@ -38,28 +38,32 @@ pub fn alloc_addr(a: *mut Arena, size: i64): !i64 {
     return addr
 }
 
+// Largest slice length (.len is i32). Only the bound of the array type
+// used for the cast below; no memory of that size exists.
+pub const MAX_LEN: i32 = 0x7fffffff
+
+// Typed allocators: cast the block to a pointer to a large array and take
+// a subslice (D19). A table type (Token, Node, …) gets its own alloc_*
+// next to its declaration, written the same way.
 pub fn alloc_u8(a: *mut Arena, n: i32): ![]u8 {
-    let p = alloc_addr(a, cast(i64, n))!
-    return sys.slice_u8(p, cast(i64, n))
+    let p = cast(*mut [MAX_LEN]u8, alloc_addr(a, cast(i64, n))!)
+    return (*p)[:n]
 }
 
 pub fn alloc_i32(a: *mut Arena, n: i32): ![]i32 {
-    let p = alloc_addr(a, cast(i64, n) * 4)!
-    return sys.slice_i32(p, cast(i64, n))
+    let p = cast(*mut [MAX_LEN]i32, alloc_addr(a, cast(i64, n) * 4)!)
+    return (*p)[:n]
 }
 
 pub fn alloc_i64(a: *mut Arena, n: i32): ![]i64 {
-    let p = alloc_addr(a, cast(i64, n) * 8)!
-    return sys.slice_i64(p, cast(i64, n))
+    let p = cast(*mut [MAX_LEN]i64, alloc_addr(a, cast(i64, n) * 8)!)
+    return (*p)[:n]
 }
 
-// TODO(G13): one allocator per element type, each with its own
-// sys.slice_* (shim / intrinsic), because (*cast(*mut [N]T, addr))[0:n]
-// emits broken C in Klin. []u8 is 16 bytes ({ptr, len}, C7.5).
-// Table allocators (alloc_tok, …) go next to their types the same way.
+// []u8 is 16 bytes ({ptr, len}, C7.5). Used by os.args.
 pub fn alloc_slices_u8(a: *mut Arena, n: i32): ![][]u8 {
-    let p = alloc_addr(a, cast(i64, n) * 16)!
-    return sys.slice_slice_u8(p, cast(i64, n))
+    let p = cast(*mut [MAX_LEN][]u8, alloc_addr(a, cast(i64, n) * 16)!)
+    return (*p)[:n]
 }
 
 pub fn mark(a: *mut Arena): i64 {
@@ -71,9 +75,12 @@ pub fn reset(a: *mut Arena, m: i64) {
     if m < 0 || m >= (*a).used {
         return
     }
-    let mut b = sys.slice_u8((*a).base + m, (*a).used - m)
-    for i in 0..<b.len {
-        b[i] = 0
+    let p = cast(*mut [MAX_LEN]u8, (*a).base + m)
+    let n = (*a).used - m
+    let mut i: i64 = 0
+    while i < n {
+        (*p)[i] = 0
+        i = i + 1
     }
     (*a).used = m
 }

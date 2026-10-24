@@ -9,25 +9,6 @@ module sys
 @[codename("klrt_syscall6")]
 pub fn call6(nr: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64): i64
 
-// Raw memory -> slice. No pointer -> slice conversion in Klin.
-@[cimport]
-@[codename("klrt_slice_u8")]
-pub fn slice_u8(addr: i64, len: i64): []u8
-
-@[cimport]
-@[codename("klrt_slice_i32")]
-pub fn slice_i32(addr: i64, len: i64): []i32
-
-@[cimport]
-@[codename("klrt_slice_i64")]
-pub fn slice_i64(addr: i64, len: i64): []i64
-
-// TODO(G13): per-element-type constructor. Remove when Klin builds
-// (*cast(*mut [N]T, addr))[0:n] correctly (docs/02-core-subset.md C5, C6).
-@[cimport]
-@[codename("klrt_slice_slice_u8")]
-pub fn slice_slice_u8(addr: i64, len: i64): [][]u8
-
 // Slice -> address, for syscall arguments (C8.4). Plain Klin (D17):
 // &b[0] is b.ptr, no bounds check, so an empty slice gives its pointer.
 pub fn addr_u8(b: []u8): i64 {
