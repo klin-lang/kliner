@@ -1,0 +1,4 @@
+struct A { b: B }
+struct B { c: C }
+struct C { a: A }
+fn main(): i32 { return 0 }

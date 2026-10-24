@@ -1,0 +1,9 @@
+struct A {
+    x: i32
+    b: B
+}
+struct B {
+    p: *A
+    c: [3]A
+}
+fn main(): i32 { return 0 }

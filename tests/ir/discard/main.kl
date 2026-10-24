@@ -1,0 +1,54 @@
+// IR golden: Klin f9f5471 forms — `f()!` as a statement, `let _`
+// (repeatable, value evaluated), `_` in destructuring, reassigning a
+// `let mut` bound to read-only bytes.
+module main
+import os
+import out
+
+struct P {
+    x: i32
+    y: i32
+}
+
+fn step(o: *mut out.Out, n: i32): !i32 {
+    (*o).dec(cast(i64, n))
+    (*o).nl()
+    if n > 2 {
+        return error(7)
+    }
+    return n
+}
+
+fn run(o: *mut out.Out): !i32 {
+    step(o, 1)!
+    (step(o, 2))!
+    let _ = step(o, 1)!
+    let _ = step(o, 2)!
+    step(o, 3)!
+    (*o).lit(b"not reached")
+    (*o).nl()
+    return 0
+}
+
+fn main(): i32 {
+    let mut o = out.Out.stdout()
+    let p = P{x: 5, y: 6}
+    let {x, y: _} = p
+    let {x: _, y} = p
+    o.dec(cast(i64, x + y))
+    o.nl()
+    let mut s = b"fn"
+    o.lit(s)
+    s = b"let"
+    o.lit(s)
+    o.nl()
+    let r = run(&o) or {
+        o.lit(b"err ")
+        o.dec(cast(i64, err))
+        o.nl()
+        o.flush_quiet()
+        return 3
+    }
+    o.flush_quiet()
+    return r
+}

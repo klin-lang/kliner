@@ -25,7 +25,7 @@ fn new_slots(m: *mut Map, a: *mut arena.Arena, cap: i32): !i32 {
 
 pub fn Map.new(a: *mut arena.Arena): !Map {
     let mut m: Map
-    let ok = new_slots(&m, a, 64)!
+    new_slots(&m, a, 64)!
     return m
 }
 
@@ -81,7 +81,7 @@ pub fn put(m: *mut Map, a: *mut arena.Arena, k: []u8, n: i32, v: i32): !i32 {
         let keys = (*m).keys
         let nums = (*m).nums
         let vals = (*m).vals
-        let ok = new_slots(m, a, vals.len * 2)!
+        new_slots(m, a, vals.len * 2)!
         for j in 0..<vals.len {
             if vals[j] >= 0 {
                 let i = slot(m, keys[j], nums[j])

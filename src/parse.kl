@@ -165,7 +165,6 @@ fn reject_c(p: *mut Parser, tok: i32, role: []u8): !i32 {
 
 // Parses the whole file into (*p).t; root = the Unit node.
 pub fn run(p: *mut Parser): !i32 {
-    let mut ok = 0
     let first = (*p).i
     let mut name = -1
     if check(p, lex.Tok.Module) {
@@ -176,11 +175,11 @@ pub fn run(p: *mut Parser): !i32 {
     (*p).quals = arena.alloc_slices_u8((*p).a, 16)!
     let base = sp(p)
     while check(p, lex.Tok.Import) {
-        ok = push(p, import_spec(p)!)!
+        push(p, import_spec(p)!)!
     }
     let mut ndecl = 0
     while !check(p, lex.Tok.Eof) {
-        ok = push(p, decl(p)!)!
+        push(p, decl(p)!)!
         ndecl += 1
     }
     if ndecl == 0 {
@@ -214,7 +213,6 @@ fn is_qual(p: *mut Parser, s: []u8): bool {
 }
 
 fn import_spec(p: *mut Parser): !i32 {
-    let mut ok = 0
     let kw = advance(p)
     let mut spec = -1
     let mut q = (*(*p).lx).src[0:0]
@@ -240,42 +238,41 @@ fn import_spec(p: *mut Parser): !i32 {
     let mut alias = -1
     if check(p, lex.Tok.Ident) {
         alias = advance(p)
-        ok = reject_c(p, alias, b"an import alias")!
+        reject_c(p, alias, b"an import alias")!
         q = text(p, alias)
     }
     if q.len == 0 {
         return error(fail(p, kw, b"import needs a module name"))
     }
-    ok = add_qual(p, q)!
+    add_qual(p, q)!
     return node(p, ast.Nk.Import, kw, spec, alias, -1, -1)
 }
 
 fn decl(p: *mut Parser): !i32 {
-    let mut ok = 0
     let first = (*p).i
     let base = sp(p)
     let mut cimport = false
     while check(p, lex.Tok.At) {
         advance(p)
-        ok = expect(p, lex.Tok.LBracket, b"expected `[` after `@`")!
+        expect(p, lex.Tok.LBracket, b"expected `[` after `@`")!
         while true {
             let name = expect(p, lex.Tok.Ident, b"expected attribute name")!
             let mut arg = -1
             if check(p, lex.Tok.LParen) {
                 advance(p)
                 arg = expect(p, lex.Tok.Str, b"expected attribute string")!
-                ok = expect(p, lex.Tok.RParen, b"expected `)` after attribute string")!
+                expect(p, lex.Tok.RParen, b"expected `)` after attribute string")!
             }
             if is_text(p, name, b"cimport") {
                 cimport = true
             }
-            ok = push(p, node(p, ast.Nk.Attr, name, arg, -1, -1, -1)!)!
+            push(p, node(p, ast.Nk.Attr, name, arg, -1, -1, -1)!)!
             if !check(p, lex.Tok.Comma) {
                 break
             }
             advance(p)
         }
-        ok = expect(p, lex.Tok.RBracket, b"expected `]` after attributes")!
+        expect(p, lex.Tok.RBracket, b"expected `]` after attributes")!
     }
     let attrs = list(p, base)!
     let mut flags = 0
@@ -308,19 +305,18 @@ fn decl(p: *mut Parser): !i32 {
 }
 
 fn struct_decl(p: *mut Parser): !i32 {
-    let mut ok = 0
     let kw = advance(p)
     let name = expect(p, lex.Tok.Ident, b"expected struct name")!
-    ok = reject_c(p, name, b"a struct name")!
-    ok = expect(p, lex.Tok.LBrace, b"expected `{`")!
+    reject_c(p, name, b"a struct name")!
+    expect(p, lex.Tok.LBrace, b"expected `{`")!
     let base = sp(p)
     while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
         // `x, y: T` — names first, then one type for all of them
         let pend = sp(p)
         while true {
             let f = expect(p, lex.Tok.Ident, b"expected field name")!
-            ok = reject_c(p, f, b"a field name")!
-            ok = push(p, f)!
+            reject_c(p, f, b"a field name")!
+            push(p, f)!
             if check(p, lex.Tok.Colon) {
                 advance(p)
                 let ty = type_name(p)!
@@ -332,16 +328,15 @@ fn struct_decl(p: *mut Parser): !i32 {
                 }
                 break
             }
-            ok = expect(p, lex.Tok.Comma, b"expected `,` or `:` after field name")!
+            expect(p, lex.Tok.Comma, b"expected `,` or `:` after field name")!
         }
     }
-    ok = expect(p, lex.Tok.RBrace, b"expected `}`")!
+    expect(p, lex.Tok.RBrace, b"expected `}`")!
     let l = list(p, base)!
     return node(p, ast.Nk.Struct, kw, name, -1, -1, l)
 }
 
 fn global_decl(p: *mut Parser): !i32 {
-    let mut ok = 0
     let kw = advance(p)
     let mut m = 0
     if check(p, lex.Tok.Mut) {
@@ -352,8 +347,8 @@ fn global_decl(p: *mut Parser): !i32 {
         return error(fail(p, (*p).i, b"module-level `let` binds one name"))
     }
     let name = expect(p, lex.Tok.Ident, b"expected global name")!
-    ok = reject_c(p, name, b"a global name")!
-    ok = expect(p, lex.Tok.Colon, b"expected `:` after global name")!
+    reject_c(p, name, b"a global name")!
+    expect(p, lex.Tok.Colon, b"expected `:` after global name")!
     let ty = type_name(p)!
     let mut init = -1
     if check(p, lex.Tok.Eq) {
@@ -364,43 +359,41 @@ fn global_decl(p: *mut Parser): !i32 {
 }
 
 fn const_decl(p: *mut Parser): !i32 {
-    let mut ok = 0
     let kw = advance(p)
     let name = expect(p, lex.Tok.Ident, b"expected constant name")!
-    ok = reject_c(p, name, b"a constant name")!
-    ok = expect(p, lex.Tok.Colon, b"expected `:` after constant name")!
+    reject_c(p, name, b"a constant name")!
+    expect(p, lex.Tok.Colon, b"expected `:` after constant name")!
     let ty = type_name(p)!
-    ok = expect(p, lex.Tok.Eq, b"expected `=` after constant type")!
+    expect(p, lex.Tok.Eq, b"expected `=` after constant type")!
     let init = expr(p)!
     return node(p, ast.Nk.Const, kw, name, ty, init, -1)
 }
 
 fn enum_decl(p: *mut Parser): !i32 {
-    let mut ok = 0
     let kw = advance(p)
     let name = expect(p, lex.Tok.Ident, b"expected enum name")!
-    ok = reject_c(p, name, b"an enum name")!
+    reject_c(p, name, b"an enum name")!
     let mut base_ty = -1
     if check(p, lex.Tok.Colon) {
         advance(p)
         base_ty = type_name(p)!
     }
-    ok = expect(p, lex.Tok.LBrace, b"expected `{`")!
+    expect(p, lex.Tok.LBrace, b"expected `{`")!
     let base = sp(p)
     while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
         let v = expect(p, lex.Tok.Ident, b"expected enum variant name")!
-        ok = reject_c(p, v, b"an enum variant")!
+        reject_c(p, v, b"an enum variant")!
         let mut value = -1
         if check(p, lex.Tok.Eq) {
             advance(p)
             value = expr(p)!
         }
-        ok = push(p, node(p, ast.Nk.Variant, v, value, -1, -1, -1)!)!
+        push(p, node(p, ast.Nk.Variant, v, value, -1, -1, -1)!)!
         if check(p, lex.Tok.Comma) {
             advance(p)
         }
     }
-    ok = expect(p, lex.Tok.RBrace, b"expected `}`")!
+    expect(p, lex.Tok.RBrace, b"expected `}`")!
     if sp(p) == base {
         return error(fail3(p, kw, b"enum `", name, b"` must have at least one variant"))
     }
@@ -409,7 +402,6 @@ fn enum_decl(p: *mut Parser): !i32 {
 }
 
 fn func(p: *mut Parser, is_async: bool, cimport: bool): !i32 {
-    let mut ok = 0
     let kw = advance(p)
     let mut recv = -1
     if check(p, lex.Tok.LParen) {
@@ -420,35 +412,35 @@ fn func(p: *mut Parser, is_async: bool, cimport: bool): !i32 {
             m = 1
         }
         let rn = expect(p, lex.Tok.Ident, b"expected receiver name")!
-        ok = reject_c(p, rn, b"a receiver name")!
-        ok = expect(p, lex.Tok.Colon, b"expected `:` after receiver")!
+        reject_c(p, rn, b"a receiver name")!
+        expect(p, lex.Tok.Colon, b"expected `:` after receiver")!
         let rt = type_name(p)!
-        ok = expect(p, lex.Tok.RParen, b"expected `)` after receiver")!
+        expect(p, lex.Tok.RParen, b"expected `)` after receiver")!
         recv = node(p, ast.Nk.Recv, rn, rt, m, -1, -1)!
     }
     if is_async && recv >= 0 {
         return error(fail(p, ntok(p, recv), b"async methods are not supported in MVP"))
     }
     let mut name = expect(p, lex.Tok.Ident, b"expected function name")!
-    ok = reject_c(p, name, b"a function name")!
+    reject_c(p, name, b"a function name")!
     let mut assoc = -1
     if recv < 0 && check(p, lex.Tok.Dot) {
         advance(p)
         assoc = name
         name = expect(p, lex.Tok.Ident, b"expected associated function name")!
-        ok = reject_c(p, name, b"a function name")!
+        reject_c(p, name, b"a function name")!
     }
     if is_async && assoc >= 0 {
         return error(fail(p, kw, b"async associated functions are not supported in MVP"))
     }
-    ok = expect(p, lex.Tok.LParen, b"expected `(`")!
+    expect(p, lex.Tok.LParen, b"expected `(`")!
     let base = sp(p)
     if !check(p, lex.Tok.RParen) {
         let mut pend = sp(p)
         while true {
             let pn = expect(p, lex.Tok.Ident, b"expected parameter name")!
-            ok = reject_c(p, pn, b"a parameter name")!
-            ok = push(p, pn)!
+            reject_c(p, pn, b"a parameter name")!
+            push(p, pn)!
             if check(p, lex.Tok.Colon) {
                 advance(p)
                 let ty = type_name(p)!
@@ -465,10 +457,10 @@ fn func(p: *mut Parser, is_async: bool, cimport: bool): !i32 {
                 }
                 break
             }
-            ok = expect(p, lex.Tok.Comma, b"expected `,` or `:` after parameter name")!
+            expect(p, lex.Tok.Comma, b"expected `,` or `:` after parameter name")!
         }
     }
-    ok = expect(p, lex.Tok.RParen, b"expected `)`")!
+    expect(p, lex.Tok.RParen, b"expected `)`")!
     let params = list(p, base)!
     let mut ret = -1
     if check(p, lex.Tok.Colon) {
@@ -489,19 +481,17 @@ fn func(p: *mut Parser, is_async: bool, cimport: bool): !i32 {
 // ---- statements ----
 
 fn block(p: *mut Parser): !i32 {
-    let mut ok = 0
     let open = expect(p, lex.Tok.LBrace, b"expected `{`")!
     let base = sp(p)
     while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
-        ok = push(p, stmt(p)!)!
+        push(p, stmt(p)!)!
     }
-    ok = expect(p, lex.Tok.RBrace, b"expected `}`")!
+    expect(p, lex.Tok.RBrace, b"expected `}`")!
     let l = list(p, base)!
     return node(p, ast.Nk.Block, open, -1, -1, -1, l)
 }
 
 fn stmt(p: *mut Parser): !i32 {
-    let mut ok = 0
     let k = cur(p)
     if k == lex.Tok.Let {
         return let_stmt(p)
@@ -536,9 +526,9 @@ fn stmt(p: *mut Parser): !i32 {
     }
     if k == lex.Tok.Asm {
         let kw = advance(p)
-        ok = expect(p, lex.Tok.LParen, b"expected `(` after `asm`")!
+        expect(p, lex.Tok.LParen, b"expected `(` after `asm`")!
         let code = expect(p, lex.Tok.Str, b"expected asm instruction string")!
-        ok = expect(p, lex.Tok.RParen, b"expected `)` after the asm instruction")!
+        expect(p, lex.Tok.RParen, b"expected `)` after the asm instruction")!
         return node(p, ast.Nk.Asm, kw, code, -1, -1, -1)
     }
     if k == lex.Tok.Break {
@@ -555,7 +545,7 @@ fn stmt(p: *mut Parser): !i32 {
     }
     if k == lex.Tok.Ident && next_is(p, lex.Tok.ColonEq) {
         let name = advance(p)
-        ok = reject_c(p, name, b"a variable name")!
+        reject_c(p, name, b"a variable name")!
         advance(p)
         let init = expr(p)!
         return node(p, ast.Nk.Let, name, -1, init, 3, -1)
@@ -619,12 +609,11 @@ fn is_compound(k: lex.Tok): bool {
 }
 
 fn stmt_from_expr(p: *mut Parser, e: i32): !i32 {
-    let mut ok = 0
     if check(p, lex.Tok.Comma) {
         return multi_assign(p, e)
     }
     if check(p, lex.Tok.Eq) || is_compound(cur(p)) {
-        ok = need_assignable(p, e)!
+        need_assignable(p, e)!
         let mut op = -1
         if !check(p, lex.Tok.Eq) {
             op = (*p).i
@@ -634,29 +623,28 @@ fn stmt_from_expr(p: *mut Parser, e: i32): !i32 {
         return node(p, ast.Nk.Assign, ntok(p, e), e, v, op, -1)
     }
     let k = nkind(p, e)
-    if k == ast.Nk.Call || k == ast.Nk.MCall || k == ast.Nk.Await {
+    if k == ast.Nk.Call || k == ast.Nk.MCall || k == ast.Nk.Await || k == ast.Nk.Propagate {
         return node(p, ast.Nk.ExprStmt, ntok(p, e), e, -1, -1, -1)
     }
     return error(fail(p, ntok(p, e), b"expected assignment `=` or call"))
 }
 
 fn multi_assign(p: *mut Parser, first: i32): !i32 {
-    let mut ok = 0
     let base = sp(p)
-    ok = push(p, first)!
+    push(p, first)!
     while check(p, lex.Tok.Comma) {
         advance(p)
-        ok = push(p, expr(p)!)!
+        push(p, expr(p)!)!
     }
     let nt = sp(p) - base
     for j in 0..<nt {
-        ok = need_assignable(p, (*(*p).t).stack[base + j])!
+        need_assignable(p, (*(*p).t).stack[base + j])!
     }
-    ok = expect(p, lex.Tok.Eq, b"expected `=` in multi-assignment")!
-    ok = push(p, expr(p)!)!
+    expect(p, lex.Tok.Eq, b"expected `=` in multi-assignment")!
+    push(p, expr(p)!)!
     while check(p, lex.Tok.Comma) {
         advance(p)
-        ok = push(p, expr(p)!)!
+        push(p, expr(p)!)!
     }
     let nv = sp(p) - base - nt
     if nt != nv {
@@ -705,7 +693,6 @@ fn seen(p: *mut Parser, from: i32, step: i32, tok: i32): bool {
 }
 
 fn struct_assign(p: *mut Parser): !i32 {
-    let mut ok = 0
     let open = advance(p)
     let base = sp(p)
     if !check(p, lex.Tok.RBrace) {
@@ -718,12 +705,12 @@ fn struct_assign(p: *mut Parser): !i32 {
             if check(p, lex.Tok.Colon) {
                 advance(p)
                 target = expr(p)!
-                ok = need_assignable(p, target)!
+                need_assignable(p, target)!
             } else {
                 target = node(p, ast.Nk.Name, f, -1, -1, -1, -1)!
             }
-            ok = push(p, f)!
-            ok = push(p, target)!
+            push(p, f)!
+            push(p, target)!
             if check(p, lex.Tok.Comma) {
                 advance(p)
                 if check(p, lex.Tok.RBrace) {
@@ -734,18 +721,17 @@ fn struct_assign(p: *mut Parser): !i32 {
             break
         }
     }
-    ok = expect(p, lex.Tok.RBrace, b"expected `}` after destructuring pattern")!
+    expect(p, lex.Tok.RBrace, b"expected `}` after destructuring pattern")!
     if sp(p) == base {
         return error(fail(p, open, b"destructuring pattern needs at least one field"))
     }
-    ok = expect(p, lex.Tok.Eq, b"expected `=` in destructuring assignment")!
+    expect(p, lex.Tok.Eq, b"expected `=` in destructuring assignment")!
     let src = expr(p)!
     let l = list(p, base)!
     return node(p, ast.Nk.StructAssign, open, src, -1, -1, l)
 }
 
 fn let_stmt(p: *mut Parser): !i32 {
-    let mut ok = 0
     let kw = advance(p)
     let mut m = 0
     if check(p, lex.Tok.Mut) {
@@ -759,7 +745,7 @@ fn let_stmt(p: *mut Parser): !i32 {
         return let_array(p, kw, m)
     }
     let name = expect(p, lex.Tok.Ident, b"expected variable name")!
-    ok = reject_c(p, name, b"a variable name")!
+    reject_c(p, name, b"a variable name")!
     let mut ty = -1
     if check(p, lex.Tok.Colon) {
         advance(p)
@@ -774,7 +760,6 @@ fn let_stmt(p: *mut Parser): !i32 {
 }
 
 fn let_struct(p: *mut Parser, kw: i32, m: i32): !i32 {
-    let mut ok = 0
     advance(p)
     let base = sp(p)
     if !check(p, lex.Tok.RBrace) {
@@ -788,12 +773,15 @@ fn let_struct(p: *mut Parser, kw: i32, m: i32): !i32 {
                 advance(p)
                 bind = expect(p, lex.Tok.Ident, b"expected local name after `:`")!
             }
-            ok = reject_c(p, bind, b"a variable name")!
-            if seen(p, base + 1, 2, bind) {
-                return error(fail3(p, bind, b"duplicate name `", bind, b"` in destructuring pattern"))
+            // `_` is a discard and may be repeated (Klin f9f5471)
+            if !is_text(p, bind, b"_") {
+                reject_c(p, bind, b"a variable name")!
+                if seen(p, base + 1, 2, bind) {
+                    return error(fail3(p, bind, b"duplicate name `", bind, b"` in destructuring pattern"))
+                }
             }
-            ok = push(p, f)!
-            ok = push(p, bind)!
+            push(p, f)!
+            push(p, bind)!
             if check(p, lex.Tok.Comma) {
                 advance(p)
                 if check(p, lex.Tok.RBrace) {
@@ -804,18 +792,17 @@ fn let_struct(p: *mut Parser, kw: i32, m: i32): !i32 {
             break
         }
     }
-    ok = expect(p, lex.Tok.RBrace, b"expected `}` after destructuring pattern")!
+    expect(p, lex.Tok.RBrace, b"expected `}` after destructuring pattern")!
     if sp(p) == base {
         return error(fail(p, kw, b"destructuring pattern needs at least one field"))
     }
-    ok = expect(p, lex.Tok.Eq, b"expected `=` in destructuring `let`")!
+    expect(p, lex.Tok.Eq, b"expected `=` in destructuring `let`")!
     let src = expr(p)!
     let l = list(p, base)!
     return node(p, ast.Nk.LetStruct, kw, src, m, -1, l)
 }
 
 fn let_array(p: *mut Parser, kw: i32, m: i32): !i32 {
-    let mut ok = 0
     advance(p)
     let base = sp(p)
     let mut bound = 0
@@ -823,7 +810,7 @@ fn let_array(p: *mut Parser, kw: i32, m: i32): !i32 {
         while true {
             let name = expect(p, lex.Tok.Ident, b"expected binding name or `_`")!
             if !is_text(p, name, b"_") {
-                ok = reject_c(p, name, b"a variable name")!
+                reject_c(p, name, b"a variable name")!
                 // `_` never clashes: it is skipped by the comparison below
                 let mut dup = false
                 for j in base..<sp(p) {
@@ -837,7 +824,7 @@ fn let_array(p: *mut Parser, kw: i32, m: i32): !i32 {
                 }
                 bound += 1
             }
-            ok = push(p, name)!
+            push(p, name)!
             if check(p, lex.Tok.Comma) {
                 advance(p)
                 if check(p, lex.Tok.RBracket) {
@@ -848,14 +835,14 @@ fn let_array(p: *mut Parser, kw: i32, m: i32): !i32 {
             break
         }
     }
-    ok = expect(p, lex.Tok.RBracket, b"expected `]` after destructuring pattern")!
+    expect(p, lex.Tok.RBracket, b"expected `]` after destructuring pattern")!
     if sp(p) == base {
         return error(fail(p, kw, b"destructuring pattern needs at least one binding"))
     }
     if bound == 0 {
         return error(fail(p, kw, b"destructuring pattern binds nothing (all `_`)"))
     }
-    ok = expect(p, lex.Tok.Eq, b"expected `=` in destructuring `let`")!
+    expect(p, lex.Tok.Eq, b"expected `=` in destructuring `let`")!
     let src = expr(p)!
     let l = list(p, base)!
     return node(p, ast.Nk.LetArray, kw, src, m, -1, l)
@@ -886,13 +873,12 @@ fn header_expr(p: *mut Parser): !i32 {
 }
 
 fn for_stmt(p: *mut Parser): !i32 {
-    let mut ok = 0
     let kw = advance(p)
     if check(p, lex.Tok.Ident) && next_is(p, lex.Tok.In) {
         let name = advance(p)
         advance(p)
         let start = expr(p)!
-        ok = expect(p, lex.Tok.DotDotLt, b"expected `..<`")!
+        expect(p, lex.Tok.DotDotLt, b"expected `..<`")!
         let end = header_expr(p)!
         let body = block(p)!
         return node(p, ast.Nk.ForRange, kw, name, start, end, body)
@@ -912,12 +898,12 @@ fn for_stmt(p: *mut Parser): !i32 {
         }
         init = expr(p)!
     }
-    ok = expect(p, lex.Tok.Semi, b"expected `;`")!
+    expect(p, lex.Tok.Semi, b"expected `;`")!
     let mut cond = -1
     if !check(p, lex.Tok.Semi) {
         cond = expr(p)!
     }
-    ok = expect(p, lex.Tok.Semi, b"expected `;`")!
+    expect(p, lex.Tok.Semi, b"expected `;`")!
     let mut post_name = -1
     let mut post = -1
     let mut op = -1
@@ -932,12 +918,12 @@ fn for_stmt(p: *mut Parser): !i32 {
     }
     let body = block(p)!
     let base = sp(p)
-    ok = push(p, init_name)!
-    ok = push(p, init)!
-    ok = push(p, cond)!
-    ok = push(p, post_name)!
-    ok = push(p, post)!
-    ok = push(p, body)!
+    push(p, init_name)!
+    push(p, init)!
+    push(p, cond)!
+    push(p, post_name)!
+    push(p, post)!
+    push(p, body)!
     let l = list(p, base)!
     return node(p, ast.Nk.ForC, kw, flags, op, -1, l)
 }
@@ -945,10 +931,9 @@ fn for_stmt(p: *mut Parser): !i32 {
 // match statement (is_expr false: arms are blocks) or expression
 // (arms are `{ expr }`).
 fn match_any(p: *mut Parser, is_expr: bool): !i32 {
-    let mut ok = 0
     let kw = advance(p)
     let subject = header_expr(p)!
-    ok = expect(p, lex.Tok.LBrace, b"expected `{` after the `match` subject")!
+    expect(p, lex.Tok.LBrace, b"expected `{` after the `match` subject")!
     let base = sp(p)
     while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
         let pat = pattern(p)!
@@ -964,15 +949,15 @@ fn match_any(p: *mut Parser, is_expr: bool): !i32 {
         }
         let mut body = -1
         if is_expr {
-            ok = expect(p, lex.Tok.LBrace, b"expected `{` before the arm value")!
+            expect(p, lex.Tok.LBrace, b"expected `{` before the arm value")!
             body = expr(p)!
-            ok = expect(p, lex.Tok.RBrace, b"expected `}` after the arm value")!
+            expect(p, lex.Tok.RBrace, b"expected `}` after the arm value")!
         } else {
             body = block(p)!
         }
-        ok = push(p, node(p, ast.Nk.Arm, ntok(p, pat), pat, guard, body, -1)!)!
+        push(p, node(p, ast.Nk.Arm, ntok(p, pat), pat, guard, body, -1)!)!
     }
-    ok = expect(p, lex.Tok.RBrace, b"expected `}` closing `match`")!
+    expect(p, lex.Tok.RBrace, b"expected `}` closing `match`")!
     if sp(p) == base {
         return error(fail(p, kw, b"`match` requires at least one arm"))
     }
@@ -984,7 +969,6 @@ fn match_any(p: *mut Parser, is_expr: bool): !i32 {
 }
 
 fn pattern(p: *mut Parser): !i32 {
-    let mut ok = 0
     if check(p, lex.Tok.Else) {
         return node(p, ast.Nk.PatElse, advance(p), -1, -1, -1, -1)
     }
@@ -1007,10 +991,10 @@ fn pattern(p: *mut Parser): !i32 {
         r = node(p, ast.Nk.PatRange, op, first, end, -1, -1)!
     } else {
         let base = sp(p)
-        ok = push(p, first)!
+        push(p, first)!
         while check(p, lex.Tok.Comma) {
             advance(p)
-            ok = push(p, expr(p)!)!
+            push(p, expr(p)!)!
         }
         let l = list(p, base)!
         r = node(p, ast.Nk.PatLit, ntok(p, first), -1, -1, -1, l)!
@@ -1036,7 +1020,6 @@ pub fn expr(p: *mut Parser): !i32 {
 // (`or { return }`, `or { break }`) a = -1; the checker requires that
 // every path diverges (Klin D21).
 fn or_block(p: *mut Parser): !i32 {
-    let mut ok = 0
     let open = expect(p, lex.Tok.LBrace, b"expected `{` after `or`")!
     let base = sp(p)
     while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
@@ -1076,7 +1059,7 @@ fn or_block(p: *mut Parser): !i32 {
                 diag.clear((*p).d)
                 s = match_any(p, false)!
             }
-            ok = push(p, s)!
+            push(p, s)!
             continue
         }
         if can_start_expr(cur(p)) {
@@ -1086,9 +1069,9 @@ fn or_block(p: *mut Parser): !i32 {
                 let l = list(p, base)!
                 return node(p, ast.Nk.OrBlock, open, e, -1, -1, l)
             }
-            ok = push(p, stmt_from_expr(p, e)!)!
+            push(p, stmt_from_expr(p, e)!)!
         } else {
-            ok = push(p, stmt(p)!)!
+            push(p, stmt(p)!)!
         }
     }
     if !check(p, lex.Tok.RBrace) {
@@ -1151,20 +1134,19 @@ fn call_paren_same_line(p: *mut Parser, callee: i32): bool {
 
 // `( args )`; returns the list.
 fn arg_list(p: *mut Parser): !i32 {
-    let mut ok = 0
-    ok = expect(p, lex.Tok.LParen, b"expected `(`")!
+    expect(p, lex.Tok.LParen, b"expected `(`")!
     (*p).paren += 1
     let saved = (*p).no_struct
     (*p).no_struct = false
     let base = sp(p)
     if !check(p, lex.Tok.RParen) {
-        ok = push(p, expr(p)!)!
+        push(p, expr(p)!)!
         while check(p, lex.Tok.Comma) {
             advance(p)
-            ok = push(p, expr(p)!)!
+            push(p, expr(p)!)!
         }
     }
-    ok = expect(p, lex.Tok.RParen, b"expected `)`")!
+    expect(p, lex.Tok.RParen, b"expected `)`")!
     (*p).paren -= 1
     (*p).no_struct = saved
     return list(p, base)
@@ -1195,7 +1177,6 @@ fn has_interp(p: *mut Parser, tok: i32): bool {
 }
 
 fn primary(p: *mut Parser): !i32 {
-    let mut ok = 0
     let t = (*p).i
     let k = cur(p)
     if k == lex.Tok.Match {
@@ -1204,12 +1185,12 @@ fn primary(p: *mut Parser): !i32 {
     if k == lex.Tok.Pick {
         advance(p)
         let cond = header_expr(p)!
-        ok = expect(p, lex.Tok.LBrace, b"expected `{` after the `pick` condition")!
+        expect(p, lex.Tok.LBrace, b"expected `{` after the `pick` condition")!
         let th = expr(p)!
-        ok = expect(p, lex.Tok.RBrace, b"expected `}` after the `pick` then-expression")!
-        ok = expect(p, lex.Tok.LBrace, b"expected `{` before the `pick` else-expression")!
+        expect(p, lex.Tok.RBrace, b"expected `}` after the `pick` then-expression")!
+        expect(p, lex.Tok.LBrace, b"expected `{` before the `pick` else-expression")!
         let el = expr(p)!
-        ok = expect(p, lex.Tok.RBrace, b"expected `}` after the `pick` else-expression")!
+        expect(p, lex.Tok.RBrace, b"expected `}` after the `pick` else-expression")!
         return node(p, ast.Nk.Pick, t, cond, th, el, -1)
     }
     let mut e = -1
@@ -1230,10 +1211,10 @@ fn primary(p: *mut Parser): !i32 {
         e = node(p, ast.Nk.Bool, advance(p), -1, -1, -1, -1)!
     } else if k == lex.Tok.Error {
         advance(p)
-        ok = expect(p, lex.Tok.LParen, b"expected `(` after `error`")!
+        expect(p, lex.Tok.LParen, b"expected `(` after `error`")!
         (*p).paren += 1
         let code = expr(p)!
-        ok = expect(p, lex.Tok.RParen, b"expected `)` after error code")!
+        expect(p, lex.Tok.RParen, b"expected `)` after error code")!
         (*p).paren -= 1
         e = node(p, ast.Nk.ErrorE, t, code, -1, -1, -1)!
     } else if k == lex.Tok.Ident {
@@ -1251,7 +1232,7 @@ fn primary(p: *mut Parser): !i32 {
                 e = node(p, ast.Nk.Get, member, obj, -1, -1, -1)!
             }
         } else if call_paren_same_line(p, t) {
-            ok = reject_c(p, t, b"a call name")!
+            reject_c(p, t, b"a call name")!
             let args = arg_list(p)!
             e = node(p, ast.Nk.Call, t, -1, t, -1, args)!
         } else if check(p, lex.Tok.LBrace) && !(*p).no_struct {
@@ -1265,31 +1246,31 @@ fn primary(p: *mut Parser): !i32 {
         (*p).no_struct = false
         let base = sp(p)
         if !check(p, lex.Tok.RBracket) {
-            ok = push(p, expr(p)!)!
+            push(p, expr(p)!)!
             while check(p, lex.Tok.Comma) {
                 advance(p)
-                ok = push(p, expr(p)!)!
+                push(p, expr(p)!)!
             }
         }
         (*p).no_struct = saved
-        ok = expect(p, lex.Tok.RBracket, b"expected `]` after array literal")!
+        expect(p, lex.Tok.RBracket, b"expected `]` after array literal")!
         let l = list(p, base)!
         e = node(p, ast.Nk.Array, t, -1, -1, -1, l)!
     } else if k == lex.Tok.Cast {
         advance(p)
-        ok = expect(p, lex.Tok.LParen, b"expected `(` after `cast`")!
+        expect(p, lex.Tok.LParen, b"expected `(` after `cast`")!
         (*p).paren += 1
         let ty = type_name(p)!
-        ok = expect(p, lex.Tok.Comma, b"expected `,` after the cast type")!
+        expect(p, lex.Tok.Comma, b"expected `,` after the cast type")!
         let v = expr_struct_ok(p)!
-        ok = expect(p, lex.Tok.RParen, b"expected `)` after the cast")!
+        expect(p, lex.Tok.RParen, b"expected `)` after the cast")!
         (*p).paren -= 1
         e = node(p, ast.Nk.Cast, t, ty, v, -1, -1)!
     } else if k == lex.Tok.LParen {
         advance(p)
         (*p).paren += 1
         let inner = expr_struct_ok(p)!
-        ok = expect(p, lex.Tok.RParen, b"expected `)`")!
+        expect(p, lex.Tok.RParen, b"expected `)`")!
         (*p).paren -= 1
         e = node(p, ast.Nk.Group, t, inner, -1, -1, -1)!
     } else {
@@ -1301,17 +1282,17 @@ fn primary(p: *mut Parser): !i32 {
             if check(p, lex.Tok.Colon) {
                 advance(p)
                 let end = slice_bound(p)!
-                ok = expect(p, lex.Tok.RBracket, b"expected `]` after `:`")!
+                expect(p, lex.Tok.RBracket, b"expected `]` after `:`")!
                 e = node(p, ast.Nk.Slice, br, e, -1, end, -1)!
             } else {
                 let first = expr_struct_ok(p)!
                 if check(p, lex.Tok.Colon) {
                     advance(p)
                     let end = slice_bound(p)!
-                    ok = expect(p, lex.Tok.RBracket, b"expected `]` after `:`")!
+                    expect(p, lex.Tok.RBracket, b"expected `]` after `:`")!
                     e = node(p, ast.Nk.Slice, br, e, first, end, -1)!
                 } else {
-                    ok = expect(p, lex.Tok.RBracket, b"expected `]` after the index")!
+                    expect(p, lex.Tok.RBracket, b"expected `]` after the index")!
                     e = node(p, ast.Nk.Index, br, e, first, -1, -1)!
                 }
             }
@@ -1342,8 +1323,7 @@ fn slice_bound(p: *mut Parser): !i32 {
 
 // `T { … }` / `mod.T { … }`: empty, named (`x: e, …`) or positional.
 fn struct_lit(p: *mut Parser, ty: i32, md: i32): !i32 {
-    let mut ok = 0
-    ok = expect(p, lex.Tok.LBrace, b"expected `{`")!
+    expect(p, lex.Tok.LBrace, b"expected `{`")!
     let base = sp(p)
     if check(p, lex.Tok.RBrace) {
         advance(p)
@@ -1353,27 +1333,27 @@ fn struct_lit(p: *mut Parser, ty: i32, md: i32): !i32 {
     if check(p, lex.Tok.Ident) && next_is(p, lex.Tok.Colon) {
         while true {
             let name = expect(p, lex.Tok.Ident, b"expected field name")!
-            ok = expect(p, lex.Tok.Colon, b"expected `:` after field name")!
+            expect(p, lex.Tok.Colon, b"expected `:` after field name")!
             if seen(p, base, 2, name) {
                 return error(fail3(p, name, b"duplicate field `", name, b"`"))
             }
-            ok = push(p, name)!
-            ok = push(p, expr(p)!)!
+            push(p, name)!
+            push(p, expr(p)!)!
             if !check(p, lex.Tok.Comma) {
                 break
             }
             advance(p)
         }
-        ok = expect(p, lex.Tok.RBrace, b"expected `}`")!
+        expect(p, lex.Tok.RBrace, b"expected `}`")!
         let l = list(p, base)!
         return node(p, ast.Nk.StructLit, ty, md, 1, -1, l)
     }
-    ok = push(p, expr(p)!)!
+    push(p, expr(p)!)!
     while check(p, lex.Tok.Comma) {
         advance(p)
-        ok = push(p, expr(p)!)!
+        push(p, expr(p)!)!
     }
-    ok = expect(p, lex.Tok.RBrace, b"expected `}`")!
+    expect(p, lex.Tok.RBrace, b"expected `}`")!
     let l = list(p, base)!
     return node(p, ast.Nk.StructLit, ty, md, 0, -1, l)
 }
@@ -1381,7 +1361,6 @@ fn struct_lit(p: *mut Parser, ty: i32, md: i32): !i32 {
 // ---- types ----
 
 pub fn type_name(p: *mut Parser): !i32 {
-    let mut ok = 0
     let t = (*p).i
     if check(p, lex.Tok.Bang) {
         advance(p)
@@ -1390,16 +1369,16 @@ pub fn type_name(p: *mut Parser): !i32 {
     }
     if check(p, lex.Tok.Fn) {
         advance(p)
-        ok = expect(p, lex.Tok.LParen, b"expected `(` after `fn` in function type")!
+        expect(p, lex.Tok.LParen, b"expected `(` after `fn` in function type")!
         let base = sp(p)
         if !check(p, lex.Tok.RParen) {
-            ok = push(p, type_name(p)!)!
+            push(p, type_name(p)!)!
             while check(p, lex.Tok.Comma) {
                 advance(p)
-                ok = push(p, type_name(p)!)!
+                push(p, type_name(p)!)!
             }
         }
-        ok = expect(p, lex.Tok.RParen, b"expected `)` after function type parameters")!
+        expect(p, lex.Tok.RParen, b"expected `)` after function type parameters")!
         let mut ret = -1
         if check(p, lex.Tok.Colon) {
             advance(p)
@@ -1435,11 +1414,11 @@ pub fn type_name(p: *mut Parser): !i32 {
         }
         let len = expr(p)!
         let end = (*p).i
-        ok = expect(p, lex.Tok.RBracket, b"expected `]` after array length")!
+        expect(p, lex.Tok.RBracket, b"expected `]` after array length")!
         let el = type_name(p)!
         return node(p, ast.Nk.TArray, t, len, el, start, end)
     }
-    ok = expect(p, lex.Tok.Ident, b"expected type name")!
+    expect(p, lex.Tok.Ident, b"expected type name")!
     if !check(p, lex.Tok.Dot) {
         return node(p, ast.Nk.TName, t, -1, -1, -1, -1)
     }

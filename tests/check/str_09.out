@@ -1,1 +1,1 @@
-3:17: cannot bind read-only bytes to a mutable slice (copy them into a `[N]u8` to modify)
+4:6: cannot assign through read-only bytes (the binding can be reassigned; copy into a `[N]u8` to modify)

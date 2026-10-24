@@ -1,1 +1,1 @@
-5:5: field `a` needs `err_43.A` to be complete (it contains an array of that struct)
+5:5: struct cycle err_43.A -> err_43.B -> err_43.A has infinite size (store one of them behind a pointer)

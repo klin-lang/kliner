@@ -1,0 +1,1 @@
+2:12: struct cycle err_65.A -> err_65.B -> err_65.A has infinite size (store one of them behind a pointer)

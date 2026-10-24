@@ -1,0 +1,10 @@
+struct P {
+    x: i32
+    y: i32
+}
+fn main(): i32 {
+    let p = P{x: 1, y: 2}
+    let {x: _, y: _} = p
+    let {x, y: _} = p
+    return x
+}

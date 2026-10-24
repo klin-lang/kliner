@@ -79,15 +79,14 @@ pub fn Types.new(a: *mut arena.Arena): !Types {
     for i in 0..<t.idx.len {
         t.idx[i] = -1
     }
-    let mut ok = 0
     for p in 0..<13 {
-        ok = intern(&t, a, Tk.Prim, p, 0, 0)!
+        intern(&t, a, Tk.Prim, p, 0, 0)!
     }
-    ok = intern(&t, a, Tk.Void, 0, 0, 0)!
-    ok = intern(&t, a, Tk.UInt, 0, 0, 0)!
-    ok = intern(&t, a, Tk.UEmpty, 0, 0, 0)!
-    ok = intern(&t, a, Tk.BareErr, 0, 0, 0)!
-    ok = intern(&t, a, Tk.Str, 0, 0, 0)!
+    intern(&t, a, Tk.Void, 0, 0, 0)!
+    intern(&t, a, Tk.UInt, 0, 0, 0)!
+    intern(&t, a, Tk.UEmpty, 0, 0, 0)!
+    intern(&t, a, Tk.BareErr, 0, 0, 0)!
+    intern(&t, a, Tk.Str, 0, 0, 0)!
     return t
 }
 
@@ -179,7 +178,7 @@ pub fn intern(t: *mut Types, a: *mut arena.Arena, kind: Tk, x: i32, y: i32, n: i
     (*t).n += 1
     (*t).idx[s] = i
     if (*t).n * 2 > (*t).idx.len {
-        let ok = rehash(t, a)!
+        rehash(t, a)!
     }
     return i
 }

@@ -86,14 +86,14 @@ fn node_of(c: *mut Ck, r: load.Ref): ast.Node {
 // Klin's Checker.check.
 pub fn run(c: *mut Ck): !i32 {
     let p = (*c).p
-    let mut ok = check_attrs(c)!
-    ok = register_structs(c)!
-    ok = register_enums(c)!
-    ok = register_consts(c)!
-    ok = resolve_fields(c)!
-    ok = register_globals(c)!
-    ok = register_funcs(c)!
-    ok = check_global_inits(c)!
+    check_attrs(c)!
+    register_structs(c)!
+    register_enums(c)!
+    register_consts(c)!
+    resolve_fields(c)!
+    register_globals(c)!
+    register_funcs(c)!
+    check_global_inits(c)!
     let mut m1: i32 = -1
     let mut m2: i32 = -1
     for i in 0..<(*p).funcs.n {
@@ -119,7 +119,7 @@ pub fn run(c: *mut Ck): !i32 {
             return error(fail(c, (*p).first_tok, b"missing required `main` function"))
         }
     } else {
-        ok = check_main_sig(c, m1)!
+        check_main_sig(c, m1)!
     }
     for i in 0..<(*p).funcs.n {
         let r = (*p).funcs.r[i]
@@ -127,7 +127,7 @@ pub fn run(c: *mut Ck): !i32 {
         if has_attr(c, r, b"cimport") {
             continue
         }
-        ok = check_body(c, i)!
+        check_body(c, i)!
     }
     return 0
 }
@@ -177,7 +177,7 @@ fn add_cname(c: *mut Ck, name: []u8, pos: i32): !i32 {
     if tab.get(&(*c).cnames, name, 0) >= 0 {
         return error(fail3(c, pos, b"duplicate codename `", name, b"`"))
     }
-    let mut ok = tab.put(&(*c).cnames, (*c).a, name, 0, 1)!
+    tab.put(&(*c).cnames, (*c).a, name, 0, 1)!
     return 0
 }
 
@@ -222,7 +222,7 @@ fn check_attrs(c: *mut Ck): !i32 {
                 return error(fail3(c, x.tok, b"`", name, b"` attribute does not accept an argument"))
             }
             if tab.eq(name, b"codename") {
-                let mut ok = add_cname(c, attr_arg(c, an)!, x.tok)!
+                add_cname(c, attr_arg(c, an)!, x.tok)!
             }
         }
         let dn = node_of(c, r)
@@ -241,7 +241,7 @@ fn check_attrs(c: *mut Ck): !i32 {
             }
             continue
         }
-        let mut ok = check_fn_attrs(c, r)!
+        check_fn_attrs(c, r)!
     }
     return 0
 }
@@ -322,7 +322,7 @@ fn check_fn_attrs(c: *mut Ck, r: load.Ref): !i32 {
         }
     }
     if has_i && cn < 0 {
-        let mut ok = add_cname(c, attr_arg(c, isr)!, itok)!
+        add_cname(c, attr_arg(c, isr)!, itok)!
     }
     return 0
 }
@@ -339,7 +339,7 @@ fn register_structs(c: *mut Ck): !i32 {
         if tab.get(&(*c).structs, name, (*c).cm) >= 0 {
             return error(fail3(c, x.tok, b"redeclaration of struct `", name, b"`"))
         }
-        let mut ok = tab.put(&(*c).structs, (*c).a, name, (*c).cm, i)!
+        tab.put(&(*c).structs, (*c).a, name, (*c).cm, i)!
     }
     return 0
 }
@@ -354,7 +354,7 @@ fn register_enums(c: *mut Ck): !i32 {
         if tab.get(&(*c).enums, name, (*c).cm) >= 0 || tab.get(&(*c).structs, name, (*c).cm) >= 0 {
             return error(fail3(c, x.tok, b"redeclaration of type `", name, b"`"))
         }
-        let mut ok = tab.put(&(*c).enums, (*c).a, name, (*c).cm, i)!
+        tab.put(&(*c).enums, (*c).a, name, (*c).cm, i)!
     }
     for i in 0..<(*p).enums.n {
         let r = (*p).enums.r[i]
@@ -377,16 +377,16 @@ fn register_enums(c: *mut Ck): !i32 {
             if tab.get(&seen, vname, 0) >= 0 {
                 return error(fail3(c, v.tok, b"duplicate enum variant `", vname, b"`"))
             }
-            let mut ok = tab.put(&seen, (*c).a, vname, 0, 1)!
+            tab.put(&seen, (*c).a, vname, 0, 1)!
             if v.a >= 0 && nk(c, v.a) != ast.Nk.Int {
                 return error(fail(c, nd(c, v.a).tok, b"enum value must be an integer literal"))
             }
             if v.a >= 0 {
-                let mut ok2 = check_coerced_lit(c, v.a, base)!
+                check_coerced_lit(c, v.a, base)!
             }
         }
         arena.reset((*c).a, mark)
-        let mut ok3 = enum_values(c, i, 0, 0, -1)!
+        enum_values(c, i, 0, 0, -1)!
     }
     return 0
 }
@@ -423,12 +423,12 @@ fn register_consts(c: *mut Ck): !i32 {
         } else if !is_int(c, ty) {
             return error(fail(c, x.tok, b"constant type must be an integer, bool, or []u8"))
         }
-        let mut ok = tab.put(&(*c).consts, (*c).a, name, (*c).cm, i)!
+        tab.put(&(*c).consts, (*c).a, name, (*c).cm, i)!
     }
     for i in 0..<(*p).consts.n {
         if is_int(c, (*c).const_ty[i]) {
             at(c, (*p).consts.r[i])
-            let mut ok = bind_const(c, i)!
+            bind_const(c, i)!
         }
     }
     return 0
@@ -451,7 +451,7 @@ fn resolve_fields(c: *mut Ck): !i32 {
                 dup = f.tok
                 break
             }
-            let mut ok = tab.put(&seen, (*c).a, fname, 0, 1)!
+            tab.put(&seen, (*c).a, fname, 0, 1)!
             // resolved below, after the arena reset
         }
         arena.reset((*c).a, mark)
@@ -466,6 +466,7 @@ fn resolve_fields(c: *mut Ck): !i32 {
     }
     // Klin's _rejectCompleteStructCycles over the registered structs.
     let mut color = arena.alloc_u8((*c).a, (*p).structs.n + 1)!
+    let stk = arena_i32(c, (*p).structs.n + 1)!
     for i in 0..<(*p).structs.n {
         let r = (*p).structs.r[i]
         at(c, r)
@@ -473,7 +474,7 @@ fn resolve_fields(c: *mut Ck): !i32 {
             continue
         }
         if color[i] == 0 {
-            let mut ok = visit_struct(c, i, color)!
+            visit_struct(c, i, color, stk, 0)!
         }
     }
     return 0
@@ -481,43 +482,63 @@ fn resolve_fields(c: *mut Ck): !i32 {
 
 // The struct a field needs complete (Klin's _completeStructDeps; the
 // pointer / slice / fn cases that need C typedef ordering are not
-// ported), or -1.
-fn complete_dep(c: *mut Ck, ty: i32): i32 {
+// ported), or -1. *by is set when the struct is stored by value.
+fn complete_dep(c: *mut Ck, ty: i32, by: *mut bool): i32 {
     let k = kind(c, ty)
     if k == types.Tk.Struct {
         return tyof(c, ty).a
     }
+    *by = false
     if k == types.Tk.Array {
-        return complete_dep(c, elem(c, ty))
+        return complete_dep(c, elem(c, ty), by)
     }
     if k == types.Tk.Ptr && kind(c, elem(c, ty)) == types.Tk.Array {
-        return complete_dep(c, elem(c, ty))
+        return complete_dep(c, elem(c, ty), by)
     }
     return -1
 }
 
-fn visit_struct(c: *mut Ck, s: i32, color: []u8): !i32 {
+// stk[0..<sp] is the DFS path (for the K-B2 cycle message).
+fn visit_struct(c: *mut Ck, s: i32, color: []u8, stk: []i32, sp: i32): !i32 {
     let mut col = color
+    let mut st = stk
     col[s] = 1
+    st[sp] = s
     let r = (*(*c).p).structs.r[s]
     let f = load.file((*c).p, r.file)
     let x = (*f).t.nodes[r.node]
     for j in 0..<ast.count(&(*f).t, x.extra) {
         let fnode = ast.item(&(*f).t, x.extra, j)
-        let d = complete_dep(c, (*f).rt[fnode])
+        let mut by = true
+        let d = complete_dep(c, (*f).rt[fnode], &by)
         if d < 0 {
             continue
         }
         if d == s || col[d] == 1 {
             (*c).cf = r.file
             let ftok = (*f).t.nodes[fnode].tok
+            if by {
+                // Klin f9f5471 (K-B2): name the by-value cycle.
+                let mut start = sp
+                while start > 0 && st[start] != d {
+                    start -= 1
+                }
+                let e = fail(c, ftok, b"struct cycle ")
+                for k in start..<sp + 1 {
+                    add_qual(c, (*(*c).p).structs.r[st[k]])
+                    madd(c, b" -> ")
+                }
+                add_qual(c, (*(*c).p).structs.r[d])
+                madd(c, b" has infinite size (store one of them behind a pointer)")
+                return error(e)
+            }
             let e = fail3(c, ftok, b"field `", txt(c, ftok), b"` needs `")
             add_qual(c, (*(*c).p).structs.r[d])
             madd(c, b"` to be complete (it contains an array of that struct)")
             return error(e)
         }
         if col[d] == 0 {
-            let mut ok = visit_struct(c, d, color)!
+            visit_struct(c, d, color, stk, sp + 1)!
         }
     }
     col[s] = 2
@@ -549,9 +570,9 @@ fn register_globals(c: *mut Ck): !i32 {
             return error(e)
         }
         let ty = resolve(c, x.b, x.tok)!
-        let mut ok = reject_global_type(c, ty, ty, x.tok)!
+        reject_global_type(c, ty, ty, x.tok)!
         (*c).glob_ty[i] = ty
-        let mut ok2 = tab.put(&(*c).globals, (*c).a, name, (*c).cm, i)!
+        tab.put(&(*c).globals, (*c).a, name, (*c).cm, i)!
     }
     return 0
 }
@@ -580,8 +601,8 @@ fn check_global_inits(c: *mut Ck): !i32 {
         }
         let ty = (*c).glob_ty[i]
         let it = infer(c, init)!
-        let mut ok = expect_assignable(c, ty, it, tok_of(c, init))!
-        ok = materialize(c, init, ty, true)!
+        expect_assignable(c, ty, it, tok_of(c, init))!
+        materialize(c, init, ty, true)!
         if x.extra != 1 && is_u8_slice(c, ty) && is_ro_bytes(c, init)! {
             (*c).glob_rob[i] = 1
         }
@@ -791,7 +812,7 @@ fn register_funcs(c: *mut Ck): !i32 {
                 madd(c, b"` conflicts with an associated function of the same C name")
                 return error(e)
             }
-            let mut ok = variant_clash(c, rt, name, x.tok, b"method")!
+            variant_clash(c, rt, name, x.tok, b"method")!
         } else if x.b >= 0 {
             let at = resolve_tname(c, x.b, -1, x.tok)!
             if kind(c, at) != types.Tk.Struct && kind(c, at) != types.Tk.Enum {
@@ -805,7 +826,7 @@ fn register_funcs(c: *mut Ck): !i32 {
                 madd(c, b"` conflicts with a method of the same C name")
                 return error(e)
             }
-            let mut ok = variant_clash(c, at, name, x.tok, b"associated function")!
+            variant_clash(c, at, name, x.tok, b"associated function")!
         } else {
             if tab.get(&(*c).consts, name, key) >= 0 {
                 let e = fail3(c, x.tok, b"function `", name, b"` conflicts with constant `")
@@ -857,7 +878,7 @@ fn register_funcs(c: *mut Ck): !i32 {
             (*c).fn_recv[i] = rt
             set_rt(c, sig.a, rt)
         }
-        let mut ok = tab.put(col, (*c).a, name, key, i)!
+        tab.put(col, (*c).a, name, key, i)!
     }
     return 0
 }
@@ -896,7 +917,7 @@ fn check_body(c: *mut Ck, i: i32): !i32 {
         return 0
     }
     reset_scope(c)
-    let mut ok = push_scope(c)!
+    push_scope(c)!
     (*c).loops = 0
     (*c).defers = 0
     (*c).cfn = i
@@ -907,14 +928,14 @@ fn check_body(c: *mut Ck, i: i32): !i32 {
         let rv = nd(c, sig.a)
         let mut s = sym(c, txt(c, rv.tok), (*c).fn_recv[i], rv.b == 1, rv.tok)
         s.ptr_recv = rv.b == 1
-        ok = define(c, s)!
+        define(c, s)!
     }
     for j in 0..<cnt(c, sig.extra) {
         let pn = kid(c, sig.extra, j)
         let pp = nd(c, pn)
-        ok = define(c, sym(c, txt(c, pp.tok), get_rt(c, pn), false, pp.tok))!
+        define(c, sym(c, txt(c, pp.tok), get_rt(c, pn), false, pp.tok))!
     }
-    ok = check_block(c, x.extra)!
+    check_block(c, x.extra)!
     if !tab.eq(name, b"main") && (*c).ret != types.VOID && !returns_all(c, x.extra) {
         return error(fail3(c, x.tok, b"function `", name, b"` must return a value on all paths"))
     }

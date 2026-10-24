@@ -1,4 +1,5 @@
 fn main() {
     let s = b"abc"
     let mut t = s
+    t[0] = 1
 }

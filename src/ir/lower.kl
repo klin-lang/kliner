@@ -256,18 +256,18 @@ fn roundup(v: i64, a: i64): i64 {
 }
 
 fn size(l: *mut Lw, t: i32): !i64 {
-    let ok = layout(l, t)!
+    layout(l, t)!
     return (*l).tsz[t]
 }
 
 fn align(l: *mut Lw, t: i32): !i64 {
-    let ok = layout(l, t)!
+    layout(l, t)!
     return (*l).tal[t]
 }
 
 // Byte offset of field j of struct s.
 fn foffset(l: *mut Lw, s: i32, j: i32): !i64 {
-    let ok = struct_layout(l, s)!
+    struct_layout(l, s)!
     return (*l).foff[(*l).sfo[s] + j]
 }
 
@@ -313,7 +313,7 @@ fn layout(l: *mut Lw, t: i32): !i32 {
         return set_layout(l, t, roundup(ROK + es, ea), ea)
     }
     if k == types.Tk.Struct {
-        let ok = struct_layout(l, x.a)!
+        struct_layout(l, x.a)!
         return set_layout(l, t, (*l).ssz[x.a], (*l).sal[x.a])!
     }
     // Ptr, Fn, Str and the rest: a pointer
@@ -493,19 +493,19 @@ fn newr(l: *mut Lw): i32 {
 
 fn kconst(l: *mut Lw, t: u8, v: i64): !i32 {
     let r = newr(l)
-    let ok = ins(l, Op.Const, t, r, -1, -1, -1, v)!
+    ins(l, Op.Const, t, r, -1, -1, -1, v)!
     return r
 }
 
 fn op1(l: *mut Lw, op: Op, t: u8, a: i32): !i32 {
     let r = newr(l)
-    let ok = ins(l, op, t, r, a, -1, -1, 0)!
+    ins(l, op, t, r, a, -1, -1, 0)!
     return r
 }
 
 fn op2(l: *mut Lw, op: Op, t: u8, a: i32, b: i32): !i32 {
     let r = newr(l)
-    let ok = ins(l, op, t, r, a, b, -1, 0)!
+    ins(l, op, t, r, a, b, -1, 0)!
     return r
 }
 
@@ -518,13 +518,13 @@ fn conv(l: *mut Lw, to: u8, from: u8, a: i32): !i32 {
         return a
     }
     let r = newr(l)
-    let ok = ins(l, Op.Conv, to, r, a, -1, cast(i32, from), 0)!
+    ins(l, Op.Conv, to, r, a, -1, cast(i32, from), 0)!
     return r
 }
 
 fn load(l: *mut Lw, t: u8, a: i32, k: i64): !i32 {
     let r = newr(l)
-    let ok = ins(l, Op.Load, t, r, a, -1, -1, k)!
+    ins(l, Op.Load, t, r, a, -1, -1, k)!
     return r
 }
 
@@ -571,7 +571,7 @@ fn alloc_slot(l: *mut Lw, n: i64, al: i64): i64 {
 
 fn slot_addr(l: *mut Lw, off: i64): !i32 {
     let r = newr(l)
-    let ok = ins(l, Op.Slot, PTR, r, -1, -1, -1, off)!
+    ins(l, Op.Slot, PTR, r, -1, -1, -1, off)!
     return r
 }
 
@@ -620,7 +620,7 @@ fn push_scope(l: *mut Lw, tok: i32): !i32 {
 fn pop_scope(l: *mut Lw, emit_defers: bool): !i32 {
     (*l).nsc -= 1
     if emit_defers {
-        let ok = run_defers(l, (*l).sdef[(*l).nsc])!
+        run_defers(l, (*l).sdef[(*l).nsc])!
     }
     (*l).ndef = (*l).sdef[(*l).nsc]
     (*l).nloc = (*l).sloc[(*l).nsc]
@@ -678,22 +678,22 @@ fn bind(l: *mut Lw, name: []u8, t: i32, e: i32, tok: i32): !i32 {
         let i = def_local(l, name, t, false, tok)!
         let a = local_addr(l, i)!
         let sz = size(l, t)!
-        let ok = zero(l, a, sz)!
+        zero(l, a, sz)!
         return i
     }
     if is_agg(l, t) {
         let tmp = temp(l, t)!
-        let mut ok = store_as(l, e, tmp, t)!
+        store_as(l, e, tmp, t)!
         let i = def_local(l, name, t, false, tok)!
         let a = local_addr(l, i)!
         let sz = size(l, t)!
-        ok = copy(l, a, tmp, sz)!
+        copy(l, a, tmp, sz)!
         return i
     }
     let v = rv(l, e)!
     let i = def_local(l, name, t, false, tok)!
     let a = local_addr(l, i)!
-    let ok = store(l, irt(l, t), a, 0, v)!
+    store(l, irt(l, t), a, 0, v)!
     return i
 }
 
@@ -709,7 +709,7 @@ fn run_defers(l: *mut Lw, from: i32): !i32 {
         (*l).hlo = (*l).dloc[i]
         (*l).hhi = (*l).nloc
         (*l).ndef = i
-        let ok = stmt(l, (*l).dnode[i])!
+        stmt(l, (*l).dnode[i])!
         i -= 1
     }
     (*l).ndef = save_n
@@ -722,19 +722,18 @@ fn run_defers(l: *mut Lw, from: i32): !i32 {
 
 fn block(l: *mut Lw, b: i32): !i32 {
     let x = nd(l, b)
-    let mut ok = push_scope(l, x.tok)!
+    push_scope(l, x.tok)!
     let n = cnt(l, x.extra)
     for i in 0..<n {
-        ok = stmt(l, kid(l, x.extra, i))!
+        stmt(l, kid(l, x.extra, i))!
     }
-    ok = pop_scope(l, true)!
+    pop_scope(l, true)!
     return 0
 }
 
 fn stmt(l: *mut Lw, s: i32): !i32 {
     let x = nd(l, s)
     let k = x.kind
-    let mut ok = 0
     if k == ast.Nk.Block {
         return block(l, s)!
     }
@@ -755,30 +754,30 @@ fn stmt(l: *mut Lw, s: i32): !i32 {
         let yes = newlab(l, x.tok)!
         let no = newlab(l, x.tok)!
         let end = newlab(l, x.tok)!
-        ok = br(l, c, yes, no)!
-        ok = place(l, yes)!
-        ok = block(l, x.b)!
-        ok = jmp(l, end)!
-        ok = place(l, no)!
+        br(l, c, yes, no)!
+        place(l, yes)!
+        block(l, x.b)!
+        jmp(l, end)!
+        place(l, no)!
         if x.c >= 0 {
-            ok = stmt(l, x.c)!
+            stmt(l, x.c)!
         }
-        ok = place(l, end)!
+        place(l, end)!
         return 0
     }
     if k == ast.Nk.While {
         let top = newlab(l, x.tok)!
         let body = newlab(l, x.tok)!
         let end = newlab(l, x.tok)!
-        ok = place(l, top)!
+        place(l, top)!
         let c = rv(l, x.a)!
-        ok = br(l, c, body, end)!
-        ok = place(l, body)!
-        ok = push_loop(l, end, top, x.tok)!
-        ok = block(l, x.b)!
+        br(l, c, body, end)!
+        place(l, body)!
+        push_loop(l, end, top, x.tok)!
+        block(l, x.b)!
         (*l).nlp -= 1
-        ok = jmp(l, top)!
-        ok = place(l, end)!
+        jmp(l, top)!
+        place(l, end)!
         return 0
     }
     if k == ast.Nk.ForRange {
@@ -792,11 +791,11 @@ fn stmt(l: *mut Lw, s: i32): !i32 {
     }
     if k == ast.Nk.Break || k == ast.Nk.Continue {
         let j = (*l).nlp - 1
-        ok = run_defers(l, (*l).ldef[j])!
+        run_defers(l, (*l).ldef[j])!
         if k == ast.Nk.Break {
-            ok = jmp(l, (*l).lbrk[j])!
+            jmp(l, (*l).lbrk[j])!
         } else {
-            ok = jmp(l, (*l).lcont[j])!
+            jmp(l, (*l).lcont[j])!
         }
         return 0
     }
@@ -848,34 +847,34 @@ fn for_range(l: *mut Lw, s: i32): !i32 {
     let x = nd(l, s)
     let t = rt(l, s)
     let it = irt(l, t)
-    let mut ok = push_scope(l, x.tok)!
+    push_scope(l, x.tok)!
     let start = rv(l, x.b)!
     let i = def_local(l, txt(l, x.a), t, false, x.a)!
     let a0 = local_addr(l, i)!
-    ok = store(l, it, a0, 0, start)!
+    store(l, it, a0, 0, start)!
     let top = newlab(l, x.tok)!
     let body = newlab(l, x.tok)!
     let post = newlab(l, x.tok)!
     let end = newlab(l, x.tok)!
-    ok = place(l, top)!
+    place(l, top)!
     let a1 = local_addr(l, i)!
     let cur = load(l, it, a1, 0)!
     let lim = rv(l, x.c)!
     let c = op2(l, Op.Lt, it, cur, lim)!
-    ok = br(l, c, body, end)!
-    ok = place(l, body)!
-    ok = push_loop(l, end, post, x.tok)!
-    ok = block(l, x.extra)!
+    br(l, c, body, end)!
+    place(l, body)!
+    push_loop(l, end, post, x.tok)!
+    block(l, x.extra)!
     (*l).nlp -= 1
-    ok = place(l, post)!
+    place(l, post)!
     let a2 = local_addr(l, i)!
     let v = load(l, it, a2, 0)!
     let one = kconst(l, it, 1)!
     let v2 = op2(l, Op.Add, it, v, one)!
-    ok = store(l, it, a2, 0, v2)!
-    ok = jmp(l, top)!
-    ok = place(l, end)!
-    ok = pop_scope(l, false)!
+    store(l, it, a2, 0, v2)!
+    jmp(l, top)!
+    place(l, end)!
+    pop_scope(l, false)!
     return 0
 }
 
@@ -903,7 +902,7 @@ fn for_c(l: *mut Lw, s: i32): !i32 {
     let post_name = kid(l, x.extra, 3)
     let post = kid(l, x.extra, 4)
     let body = kid(l, x.extra, 5)
-    let mut ok = push_scope(l, x.tok)!
+    push_scope(l, x.tok)!
     if init_name >= 0 {
         if (x.a & 1) != 0 {
             let i = bind(l, txt(l, init_name), rt(l, s), init, init_name)!
@@ -911,30 +910,30 @@ fn for_c(l: *mut Lw, s: i32): !i32 {
             let mut t: i32 = -1
             let v = rv(l, init)!
             let a = name_target(l, init_name, &t)!
-            ok = store(l, irt(l, t), a, 0, v)!
+            store(l, irt(l, t), a, 0, v)!
         }
     }
     let top = newlab(l, x.tok)!
     let bl = newlab(l, x.tok)!
     let pl = newlab(l, x.tok)!
     let end = newlab(l, x.tok)!
-    ok = place(l, top)!
+    place(l, top)!
     if cond >= 0 {
         let c = rv(l, cond)!
-        ok = br(l, c, bl, end)!
+        br(l, c, bl, end)!
     }
-    ok = place(l, bl)!
-    ok = push_loop(l, end, pl, x.tok)!
-    ok = block(l, body)!
+    place(l, bl)!
+    push_loop(l, end, pl, x.tok)!
+    block(l, body)!
     (*l).nlp -= 1
-    ok = place(l, pl)!
+    place(l, pl)!
     if post_name >= 0 {
         let mut t: i32 = -1
         let v = rv(l, post)!
         let a = name_target(l, post_name, &t)!
         let it = irt(l, t)
         if is_txt(l, x.b, b"=") {
-            ok = store(l, it, a, 0, v)!
+            store(l, it, a, 0, v)!
         } else {
             let old = load(l, it, a, 0)!
             let mut op = Op.Add
@@ -942,18 +941,17 @@ fn for_c(l: *mut Lw, s: i32): !i32 {
                 op = Op.Sub
             }
             let nv = op2(l, op, it, old, v)!
-            ok = store(l, it, a, 0, nv)!
+            store(l, it, a, 0, nv)!
         }
     }
-    ok = jmp(l, top)!
-    ok = place(l, end)!
-    ok = pop_scope(l, false)!
+    jmp(l, top)!
+    place(l, end)!
+    pop_scope(l, false)!
     return 0
 }
 
 fn ret(l: *mut Lw, s: i32): !i32 {
     let x = nd(l, s)
-    let mut ok = 0
     if (*l).is_main {
         let mut v = -1
         if x.a >= 0 {
@@ -962,26 +960,26 @@ fn ret(l: *mut Lw, s: i32): !i32 {
         } else {
             v = kconst(l, I32, 0)!
         }
-        ok = run_defers(l, 0)!
-        ok = ins(l, Op.Ret, I32, -1, v, -1, -1, 0)!
+        run_defers(l, 0)!
+        ins(l, Op.Ret, I32, -1, v, -1, -1, 0)!
         return 0
     }
     if x.a < 0 {
-        ok = run_defers(l, 0)!
-        ok = ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
+        run_defers(l, 0)!
+        ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
         return 0
     }
     if is_agg(l, (*l).ret) {
         let sp = slot_addr(l, (*l).sret_off)!
         let dst = load(l, PTR, sp, 0)!
-        ok = store_as(l, x.a, dst, (*l).ret)!
-        ok = run_defers(l, 0)!
-        ok = ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
+        store_as(l, x.a, dst, (*l).ret)!
+        run_defers(l, 0)!
+        ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
         return 0
     }
     let v = rv(l, x.a)!
-    ok = run_defers(l, 0)!
-    ok = ins(l, Op.Ret, irt(l, (*l).ret), -1, v, -1, -1, 0)!
+    run_defers(l, 0)!
+    ins(l, Op.Ret, irt(l, (*l).ret), -1, v, -1, -1, 0)!
     return 0
 }
 
@@ -1001,20 +999,19 @@ fn stable(l: *mut Lw, e: i32, t: i32): !i32 {
         return v
     }
     let tmp = temp(l, t)!
-    let ok = put(l, tmp, t, v)!
+    put(l, tmp, t, v)!
     return tmp
 }
 
 fn assign(l: *mut Lw, s: i32): !i32 {
     let x = nd(l, s)
     let t = rt(l, x.a)
-    let mut ok = 0
     if x.c < 0 {
         if is_agg(l, t) {
             let tmp = temp(l, t)!
-            ok = store_as(l, x.b, tmp, t)!
+            store_as(l, x.b, tmp, t)!
             let dst = addr(l, x.a)!
-            ok = put(l, dst, t, tmp)!
+            put(l, dst, t, tmp)!
             return 0
         }
         let v = rv(l, x.b)!
@@ -1046,7 +1043,7 @@ fn multi_assign(l: *mut Lw, s: i32): !i32 {
     for i in 0..<n {
         let tgt = kid(l, x.extra, i)
         let dst = addr(l, tgt)!
-        let ok = put(l, dst, rt(l, tgt), vals[i])!
+        put(l, dst, rt(l, tgt), vals[i])!
     }
     return 0
 }
@@ -1066,7 +1063,7 @@ fn let_struct(l: *mut Lw, s: i32): !i32 {
         let li = def_local(l, txt(l, nt), fty, false, nt)!
         let dst = local_addr(l, li)!
         let fa = addk(l, src, off)!
-        let ok = put(l, dst, fty, value_at(l, fa, fty)!)!
+        put(l, dst, fty, value_at(l, fa, fty)!)!
     }
     return 0
 }
@@ -1099,7 +1096,7 @@ fn let_array(l: *mut Lw, s: i32): !i32 {
         let li = def_local(l, txt(l, nt), et, false, nt)!
         let dst = local_addr(l, li)!
         let ea = addk(l, base, es * cast(i64, i))!
-        let ok = put(l, dst, et, value_at(l, ea, et)!)!
+        put(l, dst, et, value_at(l, ea, et)!)!
     }
     return 0
 }
@@ -1119,7 +1116,7 @@ fn struct_assign(l: *mut Lw, s: i32): !i32 {
         let fa = addk(l, src, off)!
         let v = value_at(l, fa, fty)!
         let dst = addr(l, tgt)!
-        let ok = put(l, dst, fty, v)!
+        put(l, dst, fty, v)!
     }
     return 0
 }
@@ -1209,7 +1206,7 @@ fn finish_fn(l: *mut Lw, fi: i32, start: i32): !i32 {
     (*g).fns[fi].lab = (*g).nlab
     (*g).fns[fi].nl = (*l).nl
     for i in 0..<(*l).nl {
-        let ok = add_lab(g, (*l).labat[i])!
+        add_lab(g, (*l).labat[i])!
     }
     return 0
 }
@@ -1255,7 +1252,6 @@ fn lower_fn(l: *mut Lw, fi: i32): !i32 {
     (*l).is_main = fi == (*g).main
     (*l).ret = (*(*l).c).fn_ret[fi]
     let start = (*g).n
-    let mut ok = 0
     if is_float(l, (*l).ret) {
         return error(unsup(l, x.tok, b"a floating-point result"))
     }
@@ -1272,31 +1268,31 @@ fn lower_fn(l: *mut Lw, fi: i32): !i32 {
     if sret {
         (*l).sret_off = alloc_slot(l, 8, 8)
         let s = slot_addr(l, (*l).sret_off)!
-        ok = store(l, PTR, s, 0, 0)!
+        store(l, PTR, s, 0, 0)!
         ri = 1
     }
     if sig.a >= 0 {
         let rcv = nd(l, sig.a)
         let rty = (*(*l).c).fn_recv[fi]
         let by_ref = rcv.b == 1 || is_agg(l, rty)
-        ok = param(l, txt(l, rcv.tok), rty, ri, by_ref, rcv.tok)!
+        param(l, txt(l, rcv.tok), rty, ri, by_ref, rcv.tok)!
         ri += 1
     }
     let np0 = cnt(l, sig.extra)
     for j in 0..<np0 {
         let pn = kid(l, sig.extra, j)
         let pt = rt(l, pn)
-        ok = param(l, txt(l, nd(l, pn).tok), pt, ri, is_agg(l, pt), nd(l, pn).tok)!
+        param(l, txt(l, nd(l, pn).tok), pt, ri, is_agg(l, pt), nd(l, pn).tok)!
         ri += 1
     }
-    ok = block(l, x.extra)!
+    block(l, x.extra)!
     if (*l).is_main {
         let z = kconst(l, I32, 0)!
-        ok = ins(l, Op.Ret, I32, -1, z, -1, -1, 0)!
+        ins(l, Op.Ret, I32, -1, z, -1, -1, 0)!
     } else if tk(l, (*l).ret) == types.Tk.Void {
-        ok = ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
+        ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
     } else {
-        ok = ins(l, Op.Trap, I64, -1, -1, -1, -1, 2)!
+        ins(l, Op.Trap, I64, -1, -1, -1, -1, 2)!
     }
     (*g).fns[fi].np = np
     (*g).fns[fi].sret = sret
@@ -1307,14 +1303,14 @@ fn lower_fn(l: *mut Lw, fi: i32): !i32 {
     } else {
         (*g).fns[fi].ret = irt(l, (*l).ret)
     }
-    ok = finish_fn(l, fi, start)!
+    finish_fn(l, fi, start)!
     let o = enter(l, old)
     return 0
 }
 
 fn glob_addr(l: *mut Lw, gi: i32): !i32 {
     let r = newr(l)
-    let ok = ins(l, Op.Glob, PTR, r, -1, -1, -1, (*(*l).g).goff[gi])!
+    ins(l, Op.Glob, PTR, r, -1, -1, -1, (*(*l).g).goff[gi])!
     return r
 }
 
@@ -1330,7 +1326,6 @@ fn lower_init(l: *mut Lw): !i32 {
     (*g).fns[fi].name = b"$init"
     (*g).fns[fi].ret = VOID
     let start = (*g).n
-    let mut ok = 0
     for i in 0..<(*p).globals.n {
         let r = (*p).globals.r[i]
         let old = enter(l, r.file)
@@ -1338,11 +1333,11 @@ fn lower_init(l: *mut Lw): !i32 {
         let t = (*(*l).c).glob_ty[i]
         if x.c >= 0 {
             let dst = glob_addr(l, i)!
-            ok = store_as(l, x.c, dst, t)!
+            store_as(l, x.c, dst, t)!
         }
         let o = enter(l, old)
     }
-    ok = ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
+    ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
     return finish_fn(l, fi, start)!
 }
 
@@ -1375,13 +1370,12 @@ pub fn lower(a: *mut arena.Arena, c: *mut check.Ck, p: *mut load.Prog, g: *mut P
         off += s
     }
     (*g).gsize = roundup(off, 16)
-    let mut ok = 0
     for i in 0..<(*p).funcs.n {
-        ok = declare_fn(l, i)!
+        declare_fn(l, i)!
     }
     for i in 0..<(*p).funcs.n {
-        ok = lower_fn(l, i)!
+        lower_fn(l, i)!
     }
-    ok = lower_init(l)!
+    lower_init(l)!
     return 0
 }

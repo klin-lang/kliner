@@ -281,7 +281,7 @@ fn require_slice_elem(c: *mut Ck, e: i32, pos: i32): !i32 {
         return require_slice_elem(c, elem(c, e), pos)
     }
     if k == types.Tk.Array {
-        let mut ok = require_slice_elem(c, elem(c, e), pos)!
+        require_slice_elem(c, elem(c, e), pos)!
         let mut inner = elem(c, e)
         while kind(c, inner) == types.Tk.Array {
             inner = elem(c, inner)
@@ -414,7 +414,7 @@ fn add_ty_or_unknown(c: *mut Ck, ty: i32) {
 fn len_of_const(c: *mut Ck, k: i32, qtok: i32, ntok: i32, pos: i32): !i64 {
     let ty = (*c).const_ty[k]
     if ty >= 0 && is_int(c, ty) && (*c).const_st[k] != 2 {
-        let mut ok = bind_const(c, k)!
+        bind_const(c, k)!
     }
     if (*c).const_st[k] != 2 || ty < 0 || !is_int(c, ty) {
         let e = fail(c, pos, b"array length `")
@@ -443,7 +443,7 @@ fn len_expr_type(c: *mut Ck, e: i32, tn: i32, pos: i32, found: *mut i32): !i32 {
     } else if x.kind == ast.Nk.Unary {
         return len_expr_type(c, x.a, tn, pos, found)
     } else if x.kind == ast.Nk.Binary {
-        let mut ok = len_expr_type(c, x.a, tn, pos, found)!
+        len_expr_type(c, x.a, tn, pos, found)!
         return len_expr_type(c, x.b, tn, pos, found)
     } else {
         return 0
@@ -602,7 +602,7 @@ fn named_const(c: *mut Ck, qtok: i32, ntok: i32, p: i32, pos: i32): !Big {
         madd(c, b"`")
         return error(e)
     }
-    let mut ok = bind_const(c, k)!
+    bind_const(c, k)!
     return (*c).const_v[k]
 }
 
@@ -636,7 +636,7 @@ fn eval_unary(c: *mut Ck, n: i32, p: i32): !Big {
             }
             let mut ok = reject_range(c, lv.v, p, lt, b"", lt)!
             let f = big_not(lv.v, p)
-            let mut ok2 = reject_range(c, f, p, x.tok, b"~", lt)!
+            reject_range(c, f, p, x.tok, b"~", lt)!
             set_rt(c, x.a, p)
             return f
         }
@@ -673,7 +673,7 @@ fn eval_binary(c: *mut Ck, n: i32, p: i32): !Big {
         } else {
             v = big_shr(l, sh)
         }
-        let mut ok = reject_range(c, v, p, x.tok, b"", -1)!
+        reject_range(c, v, p, x.tok, b"", -1)!
         return v
     }
     if tab.eq(o, b"/") || tab.eq(o, b"%") {
@@ -689,7 +689,7 @@ fn eval_binary(c: *mut Ck, n: i32, p: i32): !Big {
         if tab.eq(o, b"/") {
             v = big_div(l, r)
         }
-        let mut ok = reject_range(c, v, p, x.tok, b"", -1)!
+        reject_range(c, v, p, x.tok, b"", -1)!
         return v
     }
     let mut which: i32 = -1
@@ -721,7 +721,7 @@ fn eval_binary(c: *mut Ck, n: i32, p: i32): !Big {
     } else {
         v = big_bits(l, r, which - 3)
     }
-    let mut ok = reject_range(c, v, p, x.tok, b"", -1)!
+    reject_range(c, v, p, x.tok, b"", -1)!
     return v
 }
 
@@ -770,6 +770,23 @@ fn check_coerced_lit(c: *mut Ck, e: i32, ty: i32): !i32 {
 
 // ---- enums ----
 
+// The first variant before n whose value equals x, or -1 (values were
+// checked by the caller's earlier iterations).
+fn enum_dup(c: *mut Ck, en: ast.Node, n: i32, x: Big): i32 {
+    let mut next = big_u(0)
+    for j in 0..<n {
+        let v = nd(c, kid(c, en.extra, j))
+        if v.a >= 0 && nk(c, v.a) == ast.Nk.Int {
+            next = lit_value(c, nd(c, v.a).tok).v
+        }
+        if next.neg == x.neg && next.hi == x.hi && next.lo == x.lo {
+            return j
+        }
+        next = big_add(next, big_u(1))
+    }
+    return -1
+}
+
 // Klin's _enumDiscriminants for enum e. mode 0: the range check of the
 // registration; mode 1: Klin's _checkEnumIndex fit check for `[len]`.
 fn enum_values(c: *mut Ck, e: i32, mode: i32, len: i64, pos: i32): !i32 {
@@ -799,6 +816,21 @@ fn enum_values(c: *mut Ck, e: i32, mode: i32, len: i64, pos: i32): !i32 {
             madd(c, b")")
             (*c).cf = scf
             return error(e2)
+        }
+        if mode == 0 {
+            // D25 (Klin f9f5471): no two variants share a value.
+            let pj = enum_dup(c, en, i, next)
+            if pj >= 0 {
+                let e4 = fail(c, v.tok, b"duplicate enum value ")
+                mbig(c, next)
+                madd(c, b" (`")
+                madd(c, txt(c, v.tok))
+                madd(c, b"` and `")
+                madd(c, txt(c, nd(c, kid(c, en.extra, pj)).tok))
+                madd(c, b"`)")
+                (*c).cf = scf
+                return error(e4)
+            }
         }
         if mode == 1 && (next.neg || next.hi != 0 || next.huge || next.lo >= cast(u64, len)) {
             let name = txt(c, en.a)

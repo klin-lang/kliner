@@ -67,8 +67,7 @@ fn run(o: *mut out.Out): !i32 {
     let b = logged(o, -64) or { -2 }
     (*o).dec(cast(i64, a + b))
     (*o).nl()
-    let mut ok = 0
-    ok = half(3000)!
+    half(3000)!
     (*o).lit(b"not reached")
     return 0
 }

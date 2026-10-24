@@ -1,0 +1,4 @@
+fn main(): i32 {
+    let n: i32 = printf("%d %d\n", 1, 2 + 3)
+    return puts("x") + n
+}

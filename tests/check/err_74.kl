@@ -1,0 +1,5 @@
+fn main(): i32 {
+    let a: []i32 = [1, 2, 3][0:3]
+    let s = "abc"
+    return a[7] + cast(i32, s[9])
+}

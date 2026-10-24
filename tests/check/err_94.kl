@@ -1,0 +1,8 @@
+fn f(p: *mut []u8) {}
+fn main(): i32 {
+    let mut s = b"ab"
+    f(&s)
+    let mut t = s
+    t[1] = 2
+    return 0
+}

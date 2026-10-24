@@ -1,0 +1,1 @@
+3:8: postfix operator `!` cannot be used in `main` (`main` is emitted as C `int`)

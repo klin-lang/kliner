@@ -28,15 +28,18 @@ sync with Klin main are in
 [C9](#c9-sync-with-klin-main--proposed) (**PROPOSED**, Marek decides).
 The stage 3 review (C10, the AST model, the roadmap numbering) is
 **DECIDED (2026-10-24)** — see [C11](#c11-stage-3-review--decided-2026-10-24).
-The stage 5 IR choices are in [C13](#c13-stage-5-ir--proposed)
-(**PROPOSED**, Marek decides).
+The stage 5 IR choices are in [C13](#c13-stage-5-ir--partly-decided-2026-10-24): items 1–4
+(labels, wrapping, C layout, calling convention / frame slots) are
+**DECIDED (2026-10-24)**, items 5–8 stay **PROPOSED**.
 
 The Klin changes the compiler source relies on are **merged into Klin
 main**: [#351](https://github.com/klin-lang/klin/pull/351) to
 [#356](https://github.com/klin-lang/klin/pull/356) (table in C5).
 [#357](https://github.com/klin-lang/klin/pull/357) (`a7e49ac`) and
 [#358](https://github.com/klin-lang/klin/pull/358) (`d7625f1`, G13, D19)
-are merged too; the runtime in `rt/` uses #358.
+are merged too; the runtime in `rt/` uses #358. Since stage 5 the code needs Klin main
+[#360](https://github.com/klin-lang/klin/pull/360) (`f9f5471`): `f()!`
+as a statement (C11.4).
 
 ---
 
@@ -201,7 +204,7 @@ The "was" column is the result on `757b782`.
 | — | `[65, 66]` as `[2]u8` initializer | typed as `[2]i32` | Takes the element type from context (D12) | #353 `b7e8894` |
 | — | `const X: u8 = 300`, `let x: i64 = -1`, `1 << 40` as `i64` | silent wrap; `-1` / `~7` / `1 << 40` are `i32` | Range error; unary `-` / `~` and constant expressions take the expected type (D12; C8.2, C8.3) | #352 `eccb0e1`, #353 `b7e8894`, #354 `db6bd2e` |
 
-Still open on Klin main (probed on `d7625f1`, updated for `a66ffbd`), none blocking:
+Still open on Klin main (probed on `d7625f1`, updated for `a66ffbd` and `f9f5471`), none blocking:
 
 - ~~An `or { }` block must end in a value (`or { return }` is an
   error).~~ Fixed in #359 `a66ffbd` (D21: `or { return … }`, `break`,
@@ -217,18 +220,19 @@ Still open on Klin main (probed on `d7625f1`, updated for `a66ffbd`), none block
 
 Found while writing the parser (stage 3, Klin `d7625f1`), none blocking:
 
-- `f()!` is not a statement (``expected assignment `=` or call``), and
+- ~~`f()!` is not a statement (``expected assignment `=` or call``), and
   `let _ = f()!` twice in a scope is ``redeclaration of `_` ``. The
-  parser uses `let mut ok = 0` once per function and `ok = f()!`.
-- `let mut x = b"fn"` is a checker error even if `x` is only
+  parser uses `let mut ok = 0` once per function and `ok = f()!`.~~
+  Fixed in #360 `f9f5471` (`f()!` is a statement outside `main`;
+  `let _` repeatable); the workaround is removed (C11.4).
+- ~~`let mut x = b"fn"` is a checker error even if `x` is only
   reassigned, never written through (`cannot bind read-only bytes to a
-  mutable slice`). Workaround: `src[0:0]` as the empty start value, or
-  a table lookup.
-- Diagnostics in an imported module carry the wrong file: a checker
+  mutable slice`).~~ Fixed in #360 `f9f5471`: binding and reassigning
+  is fine, writing through it is ``cannot assign through read-only
+  bytes``.
+- ~~Diagnostics in an imported module carry the wrong file: a checker
   error in `m.kl` prints `main.kl:3:12: …`, a parse error prints
-  `main.kl:/abs/path/m.kl:2:10: …` (two directories `a/`, `b/` with
-  `module m` + `main.kl` importing it; `return true` in an `i32` fn,
-  resp. a parameter named `module`).
+  `main.kl:/abs/path/m.kl:2:10: …`.~~ Fixed in #360 `f9f5471` (K-B3).
 - Language behaviour to know (not a bug): only `*` and a call's `(`
   must be on the operator's line. `log(err)` followed by `-1` on the
   next line is `log(err) - 1`, and `xs` followed by `{ x, y } = p` on
@@ -753,6 +757,11 @@ merging #4 (`8812306`):
    (tests/parse `div_sys`, tests/check `div_lib_sys`).
 4. **`let mut ok = 0` … `ok = f()!`** stays the pattern for an ignored
    `!T` result while `f()!` is not a statement in Klin.
+   *Update 2026-10-24:* Klin #360 (`f9f5471`) makes `f()!` a statement
+   (not in `main`, which is C `int`); the pattern is removed from
+   `src/`, `tools/`, `rt/` and the tests — ignored results are now
+   `f()!`. `ok` remains only where it is also the value of an
+   `or { … }` fallback.
 5. **Roadmap numbering:** 2 lexer, 3 parser, 4 checker; the later
    stages moved by two (IR 5, backend 6, fuller language 7,
    self-hosting 8, targets 9, after self-hosting 10) —
@@ -785,34 +794,35 @@ Marek answered "yes" to the three points of the stage 4 report (PR #5):
    `_start` passing `argc` / `argv` (C6), and needs only `os.args` to
    change.
 
-## C13. Stage 5 IR — PROPOSED
+## C13. Stage 5 IR — partly DECIDED (2026-10-24)
 
-Stage 5 ([05-ir.md](05-ir.md)) needed these choices; all are
-PROPOSED, Marek decides:
+Stage 5 ([05-ir.md](05-ir.md)) needed these choices. Marek approved
+1–4 on 2026-10-24 (**DECIDED**); 5–8 are still **PROPOSED**:
 
-1. **Flat instruction list with labels** instead of a block table: basic
+1. *(DECIDED 2026-10-24)* **Flat instruction list with labels** instead of a block table: basic
    blocks are implicit (from a label to `jmp` / `br` / `ret` / `trap`).
    K9 holds (three-address, virtual registers, explicit widths, no
    SSA); the backend (stage 6) can split on labels.
-2. **Every operation wraps at its type** (`u8 + u8` is a `u8`). Klin's C
-   output does not (K-B4); Kliner follows the declared types. Shift
+2. *(DECIDED 2026-10-24)* **Every operation wraps at its type** (`u8 + u8` is a `u8`). Klin's C
+   output does not (K-B5, still in `f9f5471`; reported to the Klin bot
+   by Marek); Kliner follows the declared types. Shift
    counts ≥ the width give 0 / −1 (C: undefined).
-3. **Memory layout = C's natural layout** (as Klin's C), slices
+3. *(DECIDED 2026-10-24)* **Memory layout = C's natural layout** (as Klin's C), slices
    `{ptr, len i32}` (16 bytes), `!T` = `{is_err u8 @0, err i32 @4,
    value @8}`.
-4. **Calling convention in the IR**: aggregates by address; aggregate
+4. *(DECIDED 2026-10-24)* **Calling convention in the IR**: aggregates by address; aggregate
    arguments copied by the caller into a temporary; aggregate results
    through a hidden first parameter (`sret`); `mut` receivers by
    address. Every local in a frame slot (the stage-6 codegen plan:
    "locals in stack slots").
-5. **The checker records name resolution** (`File.rf`: global /
+5. *(PROPOSED)* **The checker records name resolution** (`File.rf`: global /
    constant / function + index) and the type of `let` / `for` /
    `match` subjects, so the lowering resolves nothing again.
-6. **Interpreter on host memory** with pass-through syscalls; only
+6. *(PROPOSED)* **Interpreter on host memory** with pass-through syscalls; only
    `/proc/self/cmdline` is emulated (memfd). Traps: exit 134.
-7. **Not supported yet** in the lowering: calls of body-less functions
+7. *(PROPOSED)* **Not supported yet** in the lowering: calls of body-less functions
    other than `sys.call6`, pointer arithmetic (the checker rejects it
    today anyway), > 60 call arguments, > 64 multi-assignment targets.
-8. **`argv[0]` under `kliner-run` is the `.kl` path** (the program
+8. *(PROPOSED)* **`argv[0]` under `kliner-run` is the `.kl` path** (the program
    sees `prog.kl a b` where the native binary sees `./prog a b`), and
    the interpreter caps the call depth at 10 000 (traps beyond).

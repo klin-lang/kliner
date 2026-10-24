@@ -103,7 +103,7 @@ fn rv(l: *mut Lw, e: i32): !i32 {
         let b = lex.str_value(&(*file(l)).lx, (*l).a, x.tok)!
         let off = add_data((*l).g, b)!
         let pr = newr(l)
-        let mut ok = ins(l, Op.Data, PTR, pr, -1, -1, -1, off)!
+        ins(l, Op.Data, PTR, pr, -1, -1, -1, off)!
         return make_slice(l, rt(l, e), pr, kconst(l, I32, cast(i64, b.len))!)!
     }
     if k == ast.Nk.Name {
@@ -128,7 +128,7 @@ fn rv(l: *mut Lw, e: i32): !i32 {
             }
         }
         let tmp = temp(l, t)!
-        let ok = into(l, e, tmp, t)!
+        into(l, e, tmp, t)!
         return tmp
     }
     if k == ast.Nk.Cast {
@@ -197,15 +197,15 @@ fn str_lit(l: *mut Lw, tok: i32): !i32 {
     }
     let off = add_data((*l).g, b[0:n])!
     let r = newr(l)
-    let ok = ins(l, Op.Data, PTR, r, -1, -1, -1, off)!
+    ins(l, Op.Data, PTR, r, -1, -1, -1, off)!
     return r
 }
 
 // A new slice {ptr, len} of type t.
 fn make_slice(l: *mut Lw, t: i32, ptr: i32, n: i32): !i32 {
     let tmp = slot_addr(l, alloc_slot(l, 16, 8))!
-    let mut ok = store(l, PTR, tmp, 0, ptr)!
-    ok = store(l, I32, tmp, 8, n)!
+    store(l, PTR, tmp, 0, ptr)!
+    store(l, I32, tmp, 8, n)!
     return tmp
 }
 
@@ -222,7 +222,7 @@ fn resolved(l: *mut Lw, e: i32, code: i32, tok: i32): !i32 {
     }
     if kind == check.R_FN {
         let r = newr(l)
-        let ok = ins(l, Op.FnRef, PTR, r, idx, -1, -1, 0)!
+        ins(l, Op.FnRef, PTR, r, idx, -1, -1, 0)!
         return r
     }
     return error(fail(l, tok, b"internal: unresolved name"))
@@ -288,16 +288,16 @@ fn strlen(l: *mut Lw, s: i32, tok: i32): !i32 {
     let top = newlab(l, tok)!
     let body = newlab(l, tok)!
     let end = newlab(l, tok)!
-    let mut ok = place(l, top)!
+    place(l, top)!
     let p = op2(l, Op.Add, PTR, s, n)!
     let ch = load(l, U8, p, 0)!
-    ok = br(l, ch, body, end)!
-    ok = place(l, body)!
+    br(l, ch, body, end)!
+    place(l, body)!
     let one = kconst(l, I64, 1)!
     let n2 = op2(l, Op.Add, I64, n, one)!
-    ok = mov(l, n, n2)!
-    ok = jmp(l, top)!
-    ok = place(l, end)!
+    mov(l, n, n2)!
+    jmp(l, top)!
+    place(l, end)!
     return conv(l, I32, I64, n)!
 }
 
@@ -447,24 +447,23 @@ fn operand_t(l: *mut Lw, x: ast.Node, e: i32): u8 {
 fn binary(l: *mut Lw, e: i32): !i32 {
     let x = nd(l, e)
     let o = txt(l, x.tok)
-    let mut ok = 0
     let and = txt_is(o, b"&&")
     if and || txt_is(o, b"||") {
         let r = newr(l)
         let a = rv(l, x.a)!
-        ok = mov(l, r, a)!
+        mov(l, r, a)!
         let rhs = newlab(l, x.tok)!
         let end = newlab(l, x.tok)!
         if and {
-            ok = br(l, a, rhs, end)!
+            br(l, a, rhs, end)!
         } else {
-            ok = br(l, a, end, rhs)!
+            br(l, a, end, rhs)!
         }
-        ok = place(l, rhs)!
+        place(l, rhs)!
         let b = rv(l, x.b)!
-        ok = mov(l, r, b)!
-        ok = jmp(l, end)!
-        ok = place(l, end)!
+        mov(l, r, b)!
+        jmp(l, end)!
+        place(l, end)!
         return r
     }
     let op = binop(o)
@@ -514,7 +513,7 @@ fn fn_recv_mut(l: *mut Lw, fi: i32): bool {
 fn arg(l: *mut Lw, e: i32, pt: i32): !i32 {
     if is_agg(l, pt) {
         let tmp = temp(l, pt)!
-        let ok = store_as(l, e, tmp, pt)!
+        store_as(l, e, tmp, pt)!
         return tmp
     }
     return rv(l, e)!
@@ -571,11 +570,11 @@ fn do_call(l: *mut Lw, fi: i32, fv: i32, ft: i32, recv: i32, args: i32, tok: i32
     }
     let base = (*g).na
     for j in 0..<n {
-        let ok = add_arg(g, regs[j])!
+        add_arg(g, regs[j])!
     }
     if sys {
         let d = newr(l)
-        let ok = ins(l, Op.Sys, I64, d, -1, base, 7, 0)!
+        ins(l, Op.Sys, I64, d, -1, base, 7, 0)!
         return d
     }
     let mut d = -1
@@ -585,9 +584,9 @@ fn do_call(l: *mut Lw, fi: i32, fv: i32, ft: i32, recv: i32, args: i32, tok: i32
         rty = irt(l, ret)
     }
     if fi >= 0 {
-        let ok = ins(l, Op.Call, rty, d, fi, base, n, 0)!
+        ins(l, Op.Call, rty, d, fi, base, n, 0)!
     } else {
-        let ok = ins(l, Op.CallInd, rty, d, fv, base, n, 0)!
+        ins(l, Op.CallInd, rty, d, fv, base, n, 0)!
     }
     if res >= 0 {
         return res
@@ -667,10 +666,10 @@ fn err_return(l: *mut Lw, code: i32, tok: i32): !i32 {
     let sp = slot_addr(l, (*l).sret_off)!
     let dst = load(l, PTR, sp, 0)!
     let one = kconst(l, U8, 1)!
-    let mut ok = store(l, U8, dst, 0, one)!
-    ok = store(l, I32, dst, 4, code)!
-    ok = run_defers(l, 0)!
-    ok = ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
+    store(l, U8, dst, 0, one)!
+    store(l, I32, dst, 4, code)!
+    run_defers(l, 0)!
+    ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
     return 0
 }
 
@@ -681,11 +680,11 @@ fn propagate(l: *mut Lw, e: i32): !i32 {
     let flag = load(l, U8, r, 0)!
     let le = newlab(l, x.tok)!
     let lk = newlab(l, x.tok)!
-    let mut ok = br(l, flag, le, lk)!
-    ok = place(l, le)!
+    br(l, flag, le, lk)!
+    place(l, le)!
     let code = load(l, I32, r, 4)!
-    ok = err_return(l, code, x.tok)!
-    ok = place(l, lk)!
+    err_return(l, code, x.tok)!
+    place(l, lk)!
     if tk(l, vt) == types.Tk.Void {
         return -1
     }
@@ -712,40 +711,40 @@ fn or_val(l: *mut Lw, e: i32): !i32 {
     let le = newlab(l, x.tok)!
     let lk = newlab(l, x.tok)!
     let end = newlab(l, x.tok)!
-    let mut ok = br(l, flag, le, lk)!
-    ok = place(l, lk)!
+    br(l, flag, le, lk)!
+    place(l, lk)!
     if tk(l, vt) != types.Tk.Void {
         let va = addk(l, r, ROK)!
         let v = value_at(l, va, vt)!
         if agg {
-            ok = put(l, res, t, v)!
+            put(l, res, t, v)!
         } else {
-            ok = mov(l, res, v)!
+            mov(l, res, v)!
         }
     }
-    ok = jmp(l, end)!
-    ok = place(l, le)!
+    jmp(l, end)!
+    place(l, le)!
     let fb = nd(l, x.b)
-    ok = push_scope(l, fb.tok)!
+    push_scope(l, fb.tok)!
     let code = load(l, I32, r, 4)!
     let ei = def_local(l, b"err", types.I32, false, fb.tok)!
     let ea = local_addr(l, ei)!
-    ok = store(l, I32, ea, 0, code)!
+    store(l, I32, ea, 0, code)!
     let n = cnt(l, fb.extra)
     for i in 0..<n {
-        ok = stmt(l, kid(l, fb.extra, i))!
+        stmt(l, kid(l, fb.extra, i))!
     }
     if fb.a >= 0 {
         if agg {
-            ok = store_as(l, fb.a, res, t)!
+            store_as(l, fb.a, res, t)!
         } else {
             let v = rv(l, fb.a)!
-            ok = mov(l, res, v)!
+            mov(l, res, v)!
         }
     }
-    ok = pop_scope(l, true)!
-    ok = jmp(l, end)!
-    ok = place(l, end)!
+    pop_scope(l, true)!
+    jmp(l, end)!
+    place(l, end)!
     return res
 }
 
@@ -760,7 +759,6 @@ fn match_any(l: *mut Lw, m: i32, res: i32, t: i32): !i32 {
     let s = rv(l, x.a)!
     let end = newlab(l, x.tok)!
     let n = cnt(l, x.extra)
-    let mut ok = 0
     for i in 0..<n {
         let arm = nd(l, kid(l, x.extra, i))
         let next = newlab(l, arm.tok)!
@@ -772,46 +770,46 @@ fn match_any(l: *mut Lw, m: i32, res: i32, t: i32): !i32 {
                 let v = rv(l, kid(l, pat.extra, j))!
                 let c = op2(l, Op.Eq, it, s, v)!
                 let more = newlab(l, arm.tok)!
-                ok = br(l, c, body, more)!
-                ok = place(l, more)!
+                br(l, c, body, more)!
+                place(l, more)!
             }
-            ok = jmp(l, next)!
+            jmp(l, next)!
         } else if pat.kind == ast.Nk.PatRange {
             let lo = rv(l, pat.a)!
             let c1 = op2(l, Op.Ge, it, s, lo)!
             let mid = newlab(l, arm.tok)!
-            ok = br(l, c1, mid, next)!
-            ok = place(l, mid)!
+            br(l, c1, mid, next)!
+            place(l, mid)!
             let hi = rv(l, pat.b)!
             let c2 = op2(l, Op.Le, it, s, hi)!
-            ok = br(l, c2, body, next)!
+            br(l, c2, body, next)!
         } else if pat.kind == ast.Nk.PatRel {
             let v = rv(l, pat.a)!
             let op = binop(txt(l, pat.tok))
             let c = op2(l, op, it, s, v)!
-            ok = br(l, c, body, next)!
+            br(l, c, body, next)!
         } else {
-            ok = jmp(l, body)!
+            jmp(l, body)!
         }
-        ok = place(l, body)!
+        place(l, body)!
         if arm.b >= 0 {
             let gc = rv(l, arm.b)!
             let gl = newlab(l, arm.tok)!
-            ok = br(l, gc, gl, next)!
-            ok = place(l, gl)!
+            br(l, gc, gl, next)!
+            place(l, gl)!
         }
         if res < 0 || nk(l, arm.c) == ast.Nk.Block {
-            ok = block(l, arm.c)!
+            block(l, arm.c)!
         } else if is_agg(l, t) {
-            ok = store_as(l, arm.c, res, t)!
+            store_as(l, arm.c, res, t)!
         } else {
             let v = rv(l, arm.c)!
-            ok = mov(l, res, v)!
+            mov(l, res, v)!
         }
-        ok = jmp(l, end)!
-        ok = place(l, next)!
+        jmp(l, end)!
+        place(l, next)!
     }
-    ok = place(l, end)!
+    place(l, end)!
     return res
 }
 
@@ -826,7 +824,7 @@ fn store_as(l: *mut Lw, e: i32, dst: i32, dt: i32): !i32 {
         let whole = k == ast.Nk.ErrorE || (known(l, et) && tk(l, et) == types.Tk.Result && k != ast.Nk.Int)
         if !whole {
             let zero8 = kconst(l, U8, 0)!
-            let mut ok = store(l, U8, dst, 0, zero8)!
+            store(l, U8, dst, 0, zero8)!
             let vt = ty(l, dt).a
             if tk(l, vt) == types.Tk.Void {
                 return 0
@@ -841,11 +839,10 @@ fn store_as(l: *mut Lw, e: i32, dst: i32, dt: i32): !i32 {
 fn into(l: *mut Lw, e: i32, dst: i32, dt: i32): !i32 {
     let pe = peel(l, e)
     let x = nd(l, pe)
-    let mut ok = 0
     if x.kind == ast.Nk.StructLit && tk(l, dt) == types.Tk.Struct {
         let s = ty(l, dt).a
         let sz = size(l, dt)!
-        ok = zero(l, dst, sz)!
+        zero(l, dst, sz)!
         let nf = sfield_n(l, s)
         let n = cnt(l, x.extra)
         if x.b == 1 {
@@ -854,14 +851,14 @@ fn into(l: *mut Lw, e: i32, dst: i32, dt: i32): !i32 {
                 let j = sfield(l, s, txt(l, ft))
                 let off = foffset(l, s, j)!
                 let fa = addk(l, dst, off)!
-                ok = store_as(l, kid(l, x.extra, 2 * i + 1), fa, sfield_ty(l, s, j))!
+                store_as(l, kid(l, x.extra, 2 * i + 1), fa, sfield_ty(l, s, j))!
             }
         } else {
             for j in 0..<n {
                 if j < nf {
                     let off = foffset(l, s, j)!
                     let fa = addk(l, dst, off)!
-                    ok = store_as(l, kid(l, x.extra, j), fa, sfield_ty(l, s, j))!
+                    store_as(l, kid(l, x.extra, j), fa, sfield_ty(l, s, j))!
                 }
             }
         }
@@ -874,11 +871,11 @@ fn into(l: *mut Lw, e: i32, dst: i32, dt: i32): !i32 {
             let es = size(l, dx.a)!
             if cast(i64, n) < dx.n {
                 let sz = size(l, dt)!
-                ok = zero(l, dst, sz)!
+                zero(l, dst, sz)!
             }
             for i in 0..<n {
                 let ea = addk(l, dst, es * cast(i64, i))!
-                ok = store_as(l, kid(l, x.extra, i), ea, dx.a)!
+                store_as(l, kid(l, x.extra, i), ea, dx.a)!
             }
             return 0
         }
@@ -890,7 +887,7 @@ fn into(l: *mut Lw, e: i32, dst: i32, dt: i32): !i32 {
     }
     if x.kind == ast.Nk.ErrorE {
         let one = kconst(l, U8, 1)!
-        ok = store(l, U8, dst, 0, one)!
+        store(l, U8, dst, 0, one)!
         let c0 = rv(l, x.a)!
         let c = conv(l, I32, irt(l, rt(l, x.a)), c0)!
         return store(l, I32, dst, 4, c)!
