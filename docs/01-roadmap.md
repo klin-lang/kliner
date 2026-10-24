@@ -1,7 +1,7 @@
 # Kliner — roadmap
 
 Stages in order. Decisions behind them: [00-decisions.md](00-decisions.md).
-Status: **stage 1 — runtime (`rt/`) built by Klin; no compiler code yet.**
+Status: **stage 2 — frontend: lexer (`src/lex.kl`) done; runtime (`rt/`) from stage 1. Both built by Klin.**
 
 ---
 
@@ -17,10 +17,13 @@ Proposal: [02-core-subset.md](02-core-subset.md).
 
 ## 2. Frontend in Klin
 
-- [ ] Lexer
+- [x] Lexer — `src/lex.kl`, dump tool `tools/kliner-lex`; same token stream as
+  Klin's lexer on all `.kl` files of Kliner and Klin (`scripts/test.sh`,
+  differences: [tests/lex/README.md](../tests/lex/README.md))
 - [ ] Parser
 - [ ] Checker (types)
-- [ ] `$fn` generics
+- [ ] `$fn` generics (Klin expands `$fn` / `$name(…)` before lexing; the
+  lexer rejects `$` like Klin's does — needs a pre-pass or a `$` token)
 - [ ] Built by current Klin
 - [ ] Compared against the Dart compiler on the same inputs
 

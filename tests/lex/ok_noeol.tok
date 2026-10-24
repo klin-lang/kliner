@@ -1,0 +1,5 @@
+1:1 let let
+1:5 ident x
+1:7 equal =
+1:9 intLit 1
+1:10 eof 

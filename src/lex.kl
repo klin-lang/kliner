@@ -1,0 +1,864 @@
+// module lex — Klin lexer for Kliner (stage 2, docs/01-roadmap.md).
+//
+// Bytes in, a []Token table out (docs/02-core-subset.md C2 data model):
+// a token is kind + byte offset + byte length; its text is
+// src[start:start + len]. Positions are offsets plus a line table
+// (`lines[k]` = offset of line k + 1); `pos` turns an offset into
+// line:column on demand. No globals: all state is in a `Lexer` reached
+// through `*mut`, memory comes from the caller's arena.
+//
+// Token set and rules follow Klin's lexer (klin lib/lexer.dart) so the
+// stream is identical; scripts/test.sh compares both on the same files.
+// The lexer accepts the whole Klin token set; what is outside the core
+// subset (floats, `asm`, `async`, …) is rejected later with a clear
+// error (C3, C4), not here.
+module lex
+import arena
+
+pub enum Tok: u8 {
+    // keywords
+    Fn
+    Struct
+    Enum
+    Const
+    Pub
+    Module
+    Import
+    Let
+    Mut
+    Cast
+    Volatile
+    True
+    False
+    If
+    Else
+    While
+    For
+    In
+    Return
+    Break
+    Continue
+    Defer
+    Or
+    Error
+    Asm
+    Match
+    When
+    Pick
+    Async
+    Await
+    // literals and names
+    Ident
+    Int // also a char literal 'A' (source spelling)
+    Float
+    Str // "…": text with escapes, interpolation is resolved later
+    Bytes // b"…"
+    // operators and punctuation
+    Plus
+    PlusEq
+    Minus
+    MinusEq
+    Star
+    StarEq
+    Slash
+    SlashEq
+    Percent
+    PercentEq
+    Amp
+    AmpAmp
+    AmpEq
+    Pipe
+    PipePipe
+    PipeEq
+    Caret
+    CaretEq
+    Tilde
+    At
+    Colon
+    ColonEq
+    Eq
+    EqEq
+    Bang
+    BangEq
+    Lt
+    LtLt
+    LtLtEq
+    LtEq
+    Gt
+    GtGt
+    GtGtEq
+    GtEq
+    Dot
+    DotDotLt
+    DotDotEq
+    Semi
+    Comma
+    LParen
+    RParen
+    LBrace
+    RBrace
+    LBracket
+    RBracket
+    Eof
+}
+
+pub struct Token {
+    kind: Tok
+    start: i32 // byte offset in src
+    len: i32 // bytes; text = src[start:start + len]
+}
+
+// Error code of a lexical error (outside the errno range of `os`).
+pub const E_LEX: i32 = 1000
+
+pub struct Lexer {
+    src: []u8
+    toks: []Token // after run: all tokens, the last one is Eof
+    lines: []i32 // lines[k] = offset of the first byte of line k + 1
+    // First error (run returns error(E_LEX)): message = msg + arg + tail.
+    err_pos: i32
+    err_msg: []u8
+    err_arg: []u8
+    err_tail: []u8
+}
+
+pub fn Lexer.new(src: []u8): Lexer {
+    let mut l: Lexer
+    l.src = src
+    return l
+}
+
+// One allocator per table type, next to the type (C6 arena, D19).
+pub fn alloc_tok(a: *mut arena.Arena, n: i32): ![]Token {
+    let two: [2]Token
+    let size = cast(i64, &two[1]) - cast(i64, &two[0])
+    let p = cast(*mut [arena.MAX_LEN]Token, arena.alloc_addr(a, size * cast(i64, n))!)
+    return (*p)[:n]
+}
+
+fn fail(l: *mut Lexer, pos: i32, msg: []u8): !i32 {
+    return fail3(l, pos, msg, b"", b"")
+}
+
+fn fail3(l: *mut Lexer, pos: i32, msg: []u8, arg: []u8, tail: []u8): !i32 {
+    (*l).err_pos = pos
+    (*l).err_msg = msg
+    (*l).err_arg = arg
+    (*l).err_tail = tail
+    return error(E_LEX)
+}
+
+// Byte at i, 0 past the end (0 never continues a token).
+fn at(s: []u8, i: i32): u8 {
+    if i < s.len {
+        return s[i]
+    }
+    return 0
+}
+
+fn is_ident_start(c: u8): bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_'
+}
+
+fn is_digit(c: u8): bool {
+    return c >= '0' && c <= '9'
+}
+
+fn is_hex(c: u8): bool {
+    return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// Length of the UTF-8 sequence starting at i (1 for ASCII or a bad byte).
+fn utf8_len(s: []u8, i: i32): i32 {
+    let c = s[i]
+    let mut n = 1
+    if c >= 0xf0 {
+        n = 4
+    } else if c >= 0xe0 {
+        n = 3
+    } else if c >= 0xc0 {
+        n = 2
+    }
+    if i + n > s.len {
+        return s.len - i
+    }
+    return n
+}
+
+pub fn eq(a: []u8, b: []u8): bool {
+    if a.len != b.len {
+        return false
+    }
+    for i in 0..<a.len {
+        if a[i] != b[i] {
+            return false
+        }
+    }
+    return true
+}
+
+fn keyword(w: []u8): Tok {
+    match w.len {
+        2 {
+            if eq(w, b"fn") {
+                return Tok.Fn
+            }
+            if eq(w, b"if") {
+                return Tok.If
+            }
+            if eq(w, b"in") {
+                return Tok.In
+            }
+            if eq(w, b"or") {
+                return Tok.Or
+            }
+        }
+        3 {
+            if eq(w, b"pub") {
+                return Tok.Pub
+            }
+            if eq(w, b"let") {
+                return Tok.Let
+            }
+            if eq(w, b"mut") {
+                return Tok.Mut
+            }
+            if eq(w, b"for") {
+                return Tok.For
+            }
+            if eq(w, b"asm") {
+                return Tok.Asm
+            }
+        }
+        4 {
+            if eq(w, b"enum") {
+                return Tok.Enum
+            }
+            if eq(w, b"cast") {
+                return Tok.Cast
+            }
+            if eq(w, b"true") {
+                return Tok.True
+            }
+            if eq(w, b"else") {
+                return Tok.Else
+            }
+            if eq(w, b"when") {
+                return Tok.When
+            }
+            if eq(w, b"pick") {
+                return Tok.Pick
+            }
+        }
+        5 {
+            if eq(w, b"const") {
+                return Tok.Const
+            }
+            if eq(w, b"false") {
+                return Tok.False
+            }
+            if eq(w, b"while") {
+                return Tok.While
+            }
+            if eq(w, b"break") {
+                return Tok.Break
+            }
+            if eq(w, b"defer") {
+                return Tok.Defer
+            }
+            if eq(w, b"error") {
+                return Tok.Error
+            }
+            if eq(w, b"match") {
+                return Tok.Match
+            }
+            if eq(w, b"async") {
+                return Tok.Async
+            }
+            if eq(w, b"await") {
+                return Tok.Await
+            }
+        }
+        6 {
+            if eq(w, b"struct") {
+                return Tok.Struct
+            }
+            if eq(w, b"module") {
+                return Tok.Module
+            }
+            if eq(w, b"import") {
+                return Tok.Import
+            }
+            if eq(w, b"return") {
+                return Tok.Return
+            }
+        }
+        8 {
+            if eq(w, b"volatile") {
+                return Tok.Volatile
+            }
+            if eq(w, b"continue") {
+                return Tok.Continue
+            }
+        }
+        else {
+        }
+    }
+    return Tok.Ident
+}
+
+// Spaces, tabs, CR, LF and `//` comments (comments are not tokens).
+fn skip(s: []u8, i0: i32): i32 {
+    let mut i = i0
+    while i < s.len {
+        let c = s[i]
+        if c == ' ' || c == '\t' || c == 13 || c == '\n' {
+            i += 1
+        } else if c == '/' && at(s, i + 1) == '/' {
+            while i < s.len && s[i] != '\n' {
+                i += 1
+            }
+        } else {
+            break
+        }
+    }
+    return i
+}
+
+// Digits of one base plus `_` from i.
+fn digits(s: []u8, i0: i32, base: i32): i32 {
+    let mut i = i0
+    while i < s.len {
+        let c = s[i]
+        let ok = match base {
+            2 { c == '0' || c == '1' }
+            8 { c >= '0' && c <= '7' }
+            16 { is_hex(c) }
+            else { is_digit(c) }
+        }
+        if !ok && c != '_' {
+            break
+        }
+        i += 1
+    }
+    return i
+}
+
+// Number at start; returns its end. Same rules as Klin: 0x / 0b / 0o
+// need a digit, `1.5` needs a digit after the dot, an exponent needs a
+// digit (`1end` is `1` + `end`).
+fn number(l: *mut Lexer, start: i32): !i32 {
+    let s = (*l).src
+    let p = at(s, start + 1)
+    if s[start] == '0' && (p == 'x' || p == 'X') {
+        if !is_hex(at(s, start + 2)) {
+            return fail(l, start, b"expected hexadecimal digit after `0x`")
+        }
+        return digits(s, start + 2, 16)
+    }
+    if s[start] == '0' && (p == 'b' || p == 'B') {
+        let d = at(s, start + 2)
+        if d != '0' && d != '1' {
+            return fail(l, start, b"expected binary digit after `0b`")
+        }
+        return digits(s, start + 2, 2)
+    }
+    if s[start] == '0' && (p == 'o' || p == 'O') {
+        let d = at(s, start + 2)
+        if d < '0' || d > '7' {
+            return fail(l, start, b"expected octal digit after `0o`")
+        }
+        return digits(s, start + 2, 8)
+    }
+    let mut i = digits(s, start, 10)
+    if at(s, i) == '.' && is_digit(at(s, i + 1)) {
+        i = digits(s, i + 1, 10)
+    }
+    let e = at(s, i)
+    if e == 'e' || e == 'E' {
+        let mut j = i + 1
+        let sign = at(s, j)
+        if sign == '+' || sign == '-' {
+            j += 1
+        }
+        if is_digit(at(s, j)) {
+            i = digits(s, j, 10)
+        }
+    }
+    return i
+}
+
+// A decimal number token is a float when it has a fraction or exponent.
+fn is_float(t: []u8): bool {
+    if t.len > 1 && t[0] == '0' && (t[1] == 'x' || t[1] == 'X') {
+        return false
+    }
+    for i in 0..<t.len {
+        let c = t[i]
+        if c == '.' || c == 'e' || c == 'E' {
+            return true
+        }
+    }
+    return false
+}
+
+fn unterminated_msg(bytes: bool): []u8 {
+    if bytes {
+        return b"unterminated byte string"
+    }
+    return b"unterminated string"
+}
+
+// "…" or b"…" with the opening quote at q; returns the end (after the
+// closing quote). Escapes: \n \t \\ \" \$ \0. No raw newline.
+fn string_end(l: *mut Lexer, start: i32, q: i32, bytes: bool): !i32 {
+    let s = (*l).src
+    let unterminated = unterminated_msg(bytes)
+    let mut i = q + 1
+    while i < s.len && s[i] != '"' {
+        let c = s[i]
+        if c == '\n' {
+            return fail(l, start, unterminated)
+        }
+        if c == '\\' {
+            i += 1
+            if i >= s.len {
+                return fail(l, start, unterminated)
+            }
+            let e = s[i]
+            if e != 'n' && e != 't' && e != '\\' && e != '"' && e != '$' && e != '0' {
+                let n = utf8_len(s, i)
+                return fail3(l, start, b"unknown escape sequence `\\", s[i:i + n], b"`")
+            }
+        }
+        i += 1
+    }
+    if i >= s.len {
+        return fail(l, start, unterminated)
+    }
+    return i + 1
+}
+
+// 'A', '\n': one ASCII byte or one escape (\n \t \0 \\ \'), an integer.
+fn char_end(l: *mut Lexer, start: i32): !i32 {
+    let s = (*l).src
+    let mut i = start + 1
+    if i >= s.len || s[i] == '\n' {
+        return fail(l, start, b"unterminated character literal")
+    }
+    if s[i] == '\'' {
+        return fail(l, start, b"empty character literal")
+    }
+    if s[i] == '\\' {
+        i += 1
+        if i >= s.len {
+            return fail(l, start, b"unterminated character literal")
+        }
+        let e = s[i]
+        if e != 'n' && e != 't' && e != '0' && e != '\\' && e != '\'' {
+            let n = utf8_len(s, i)
+            return fail3(l, start, b"unknown escape sequence `\\", s[i:i + n], b"`")
+        }
+    } else if s[i] >= 0x80 {
+        return fail(l, start, b"character literal must be ASCII")
+    }
+    i += 1
+    if at(s, i) != '\'' {
+        return fail(l, start, b"expected closing `'` in character literal")
+    }
+    return i + 1
+}
+
+// Lexes (*l).src into (*l).toks and (*l).lines. error(E_LEX) on the
+// first lexical error (details in err_*), or an arena error (ENOMEM).
+pub fn run(l: *mut Lexer, a: *mut arena.Arena): !i32 {
+    let s = (*l).src
+    let mut nl = 1
+    for i in 0..<s.len {
+        if s[i] == '\n' {
+            nl += 1
+        }
+    }
+    let mut lines = arena.alloc_i32(a, nl)!
+    let mut k = 1
+    for i in 0..<s.len {
+        if s[i] == '\n' {
+            lines[k] = i + 1
+            k += 1
+        }
+    }
+    (*l).lines = lines
+    // Every token but Eof covers at least one byte.
+    let mut toks = alloc_tok(a, s.len + 1)!
+    let mut n = 0
+    let mut i = 0
+    while true {
+        i = skip(s, i)
+        let start = i
+        let mut kind = Tok.Eof
+        if i >= s.len {
+            toks[n].kind = Tok.Eof
+            toks[n].start = i
+            toks[n].len = 0
+            n += 1
+            break
+        }
+        let c = s[i]
+        let c1 = at(s, i + 1)
+        let c2 = at(s, i + 2)
+        if is_ident_start(c) {
+            i += 1
+            while i < s.len && (is_ident_start(s[i]) || is_digit(s[i])) {
+                i += 1
+            }
+            if i - start == 1 && c == 'b' && at(s, i) == '"' {
+                i = string_end(l, start, i, true)!
+                kind = Tok.Bytes
+            } else {
+                kind = keyword(s[start:i])
+            }
+        } else if is_digit(c) {
+            i = number(l, start)!
+            kind = Tok.Int
+            if is_float(s[start:i]) {
+                kind = Tok.Float
+            }
+        } else if c == '"' {
+            i = string_end(l, start, i, false)!
+            kind = Tok.Str
+        } else if c == '\'' {
+            i = char_end(l, start)!
+            kind = Tok.Int
+        } else {
+            // Operators: longest match. `w` = width, 0 = not an operator.
+            let mut w = 1
+            match c {
+                '(' {
+                    kind = Tok.LParen
+                }
+                ')' {
+                    kind = Tok.RParen
+                }
+                '{' {
+                    kind = Tok.LBrace
+                }
+                '}' {
+                    kind = Tok.RBrace
+                }
+                '[' {
+                    kind = Tok.LBracket
+                }
+                ']' {
+                    kind = Tok.RBracket
+                }
+                '~' {
+                    kind = Tok.Tilde
+                }
+                '@' {
+                    kind = Tok.At
+                }
+                ';' {
+                    kind = Tok.Semi
+                }
+                ',' {
+                    kind = Tok.Comma
+                }
+                '+' {
+                    kind = Tok.Plus
+                    if c1 == '=' {
+                        kind = Tok.PlusEq
+                    }
+                }
+                '-' {
+                    kind = Tok.Minus
+                    if c1 == '=' {
+                        kind = Tok.MinusEq
+                    }
+                }
+                '*' {
+                    kind = Tok.Star
+                    if c1 == '=' {
+                        kind = Tok.StarEq
+                    }
+                }
+                '/' {
+                    kind = Tok.Slash
+                    if c1 == '=' {
+                        kind = Tok.SlashEq
+                    }
+                }
+                '%' {
+                    kind = Tok.Percent
+                    if c1 == '=' {
+                        kind = Tok.PercentEq
+                    }
+                }
+                '^' {
+                    kind = Tok.Caret
+                    if c1 == '=' {
+                        kind = Tok.CaretEq
+                    }
+                }
+                ':' {
+                    kind = Tok.Colon
+                    if c1 == '=' {
+                        kind = Tok.ColonEq
+                    }
+                }
+                '=' {
+                    kind = Tok.Eq
+                    if c1 == '=' {
+                        kind = Tok.EqEq
+                    }
+                }
+                '!' {
+                    kind = Tok.Bang
+                    if c1 == '=' {
+                        kind = Tok.BangEq
+                    }
+                }
+                '&' {
+                    kind = Tok.Amp
+                    if c1 == '&' {
+                        kind = Tok.AmpAmp
+                    } else if c1 == '=' {
+                        kind = Tok.AmpEq
+                    }
+                }
+                '|' {
+                    kind = Tok.Pipe
+                    if c1 == '|' {
+                        kind = Tok.PipePipe
+                    } else if c1 == '=' {
+                        kind = Tok.PipeEq
+                    }
+                }
+                '<' {
+                    kind = Tok.Lt
+                    if c1 == '<' {
+                        kind = Tok.LtLt
+                        if c2 == '=' {
+                            kind = Tok.LtLtEq
+                        }
+                    } else if c1 == '=' {
+                        kind = Tok.LtEq
+                    }
+                }
+                '>' {
+                    kind = Tok.Gt
+                    if c1 == '>' {
+                        kind = Tok.GtGt
+                        if c2 == '=' {
+                            kind = Tok.GtGtEq
+                        }
+                    } else if c1 == '=' {
+                        kind = Tok.GtEq
+                    }
+                }
+                '.' {
+                    kind = Tok.Dot
+                    if c1 == '.' && c2 == '<' {
+                        kind = Tok.DotDotLt
+                    } else if c1 == '.' && c2 == '=' {
+                        kind = Tok.DotDotEq
+                    }
+                }
+                else {
+                    w = 0
+                }
+            }
+            if w == 0 {
+                let m = utf8_len(s, i)
+                return fail3(l, start, b"unexpected character `", s[i:i + m], b"`")
+            }
+            i += width(kind)
+        }
+        toks[n].kind = kind
+        toks[n].start = start
+        toks[n].len = i - start
+        n += 1
+    }
+    (*l).toks = toks[:n]
+    return n
+}
+
+// Width of an operator token in bytes.
+fn width(k: Tok): i32 {
+    match k {
+        Tok.PlusEq, Tok.MinusEq, Tok.StarEq, Tok.SlashEq, Tok.PercentEq, Tok.AmpAmp, Tok.AmpEq, Tok.PipePipe, Tok.PipeEq, Tok.CaretEq, Tok.ColonEq, Tok.EqEq, Tok.BangEq, Tok.LtLt, Tok.LtEq, Tok.GtGt, Tok.GtEq {
+            return 2
+        }
+        Tok.LtLtEq, Tok.GtGtEq, Tok.DotDotLt, Tok.DotDotEq {
+            return 3
+        }
+        else {
+            return 1
+        }
+    }
+    return 1
+}
+
+// Offset -> [line, column], both from 1. The column counts UTF-8 code
+// points (bytes that are not 10xxxxxx), like an editor; Klin counts
+// UTF-16 units, which differs only after a character outside the BMP.
+pub fn pos(l: *mut Lexer, off: i32): [2]i32 {
+    let lines = (*l).lines
+    let mut lo = 0
+    let mut hi = lines.len - 1
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2
+        if lines[mid] <= off {
+            lo = mid
+        } else {
+            hi = mid - 1
+        }
+    }
+    let s = (*l).src
+    let mut col = 1
+    for i in lines[lo]..<off {
+        if (s[i] & 0xc0) != 0x80 {
+            col += 1
+        }
+    }
+    return [lo + 1, col]
+}
+
+// Text of token i.
+pub fn text(l: *mut Lexer, i: i32): []u8 {
+    let t = (*l).toks[i]
+    return (*l).src[t.start:t.start + t.len]
+}
+
+// Value of a Str / Bytes token: the bytes between the quotes with escapes
+// resolved, in the arena. In a Str, `\$` stays the two bytes `\$` (a
+// literal dollar for the interpolation pass); in Bytes it is `$`.
+pub fn str_value(l: *mut Lexer, a: *mut arena.Arena, i: i32): ![]u8 {
+    let t = (*l).toks[i]
+    let s = (*l).src
+    let mut from = t.start + 1
+    if t.kind == Tok.Bytes {
+        from = t.start + 2
+    }
+    let end = t.start + t.len - 1
+    let mut buf = arena.alloc_u8(a, end - from)!
+    let mut n = 0
+    let mut j = from
+    while j < end {
+        let mut c = s[j]
+        if c == '\\' {
+            j += 1
+            c = s[j]
+            match c {
+                'n' {
+                    c = '\n'
+                }
+                't' {
+                    c = '\t'
+                }
+                '0' {
+                    c = 0
+                }
+                '$' {
+                    if t.kind == Tok.Str {
+                        buf[n] = '\\'
+                        n += 1
+                    }
+                }
+                else {
+                }
+            }
+        }
+        buf[n] = c
+        n += 1
+        j += 1
+    }
+    return buf[:n]
+}
+
+// Name of a kind, as in Klin's TokenKind (for dumps and messages).
+pub fn kind_name(k: Tok): []u8 {
+    let name = match k {
+        Tok.Fn { b"fn" }
+        Tok.Struct { b"struct" }
+        Tok.Enum { b"enum_" }
+        Tok.Const { b"const_" }
+        Tok.Pub { b"pub" }
+        Tok.Module { b"module" }
+        Tok.Import { b"import" }
+        Tok.Let { b"let" }
+        Tok.Mut { b"mut" }
+        Tok.Cast { b"cast" }
+        Tok.Volatile { b"volatile" }
+        Tok.True { b"true_" }
+        Tok.False { b"false_" }
+        Tok.If { b"if_" }
+        Tok.Else { b"else_" }
+        Tok.While { b"while_" }
+        Tok.For { b"for_" }
+        Tok.In { b"in_" }
+        Tok.Return { b"return_" }
+        Tok.Break { b"break_" }
+        Tok.Continue { b"continue_" }
+        Tok.Defer { b"defer_" }
+        Tok.Or { b"or_" }
+        Tok.Error { b"error_" }
+        Tok.Asm { b"asm_" }
+        Tok.Match { b"match_" }
+        Tok.When { b"when_" }
+        Tok.Pick { b"pick_" }
+        Tok.Async { b"async_" }
+        Tok.Await { b"await_" }
+        Tok.Ident { b"ident" }
+        Tok.Int { b"intLit" }
+        Tok.Float { b"floatLit" }
+        Tok.Str { b"string" }
+        Tok.Bytes { b"byteString" }
+        Tok.Plus { b"plus" }
+        Tok.PlusEq { b"plusEqual" }
+        Tok.Minus { b"minus" }
+        Tok.MinusEq { b"minusEqual" }
+        Tok.Star { b"star" }
+        Tok.StarEq { b"starEqual" }
+        Tok.Slash { b"slash" }
+        Tok.SlashEq { b"slashEqual" }
+        Tok.Percent { b"percent" }
+        Tok.PercentEq { b"percentEqual" }
+        Tok.Amp { b"ampersand" }
+        Tok.AmpAmp { b"ampAmp" }
+        Tok.AmpEq { b"ampEqual" }
+        Tok.Pipe { b"pipe" }
+        Tok.PipePipe { b"pipePipe" }
+        Tok.PipeEq { b"pipeEqual" }
+        Tok.Caret { b"caret" }
+        Tok.CaretEq { b"caretEqual" }
+        Tok.Tilde { b"tilde" }
+        Tok.At { b"atSign" }
+        Tok.Colon { b"colon" }
+        Tok.ColonEq { b"colonEqual" }
+        Tok.Eq { b"equal" }
+        Tok.EqEq { b"equalEqual" }
+        Tok.Bang { b"bang" }
+        Tok.BangEq { b"bangEqual" }
+        Tok.Lt { b"less" }
+        Tok.LtLt { b"lessLess" }
+        Tok.LtLtEq { b"lessLessEqual" }
+        Tok.LtEq { b"lessEqual" }
+        Tok.Gt { b"greater" }
+        Tok.GtGt { b"greaterGreater" }
+        Tok.GtGtEq { b"greaterGreaterEqual" }
+        Tok.GtEq { b"greaterEqual" }
+        Tok.Dot { b"dot" }
+        Tok.DotDotLt { b"dotDotLess" }
+        Tok.DotDotEq { b"dotDotEqual" }
+        Tok.Semi { b"semicolon" }
+        Tok.Comma { b"comma" }
+        Tok.LParen { b"lParen" }
+        Tok.RParen { b"rParen" }
+        Tok.LBrace { b"lBrace" }
+        Tok.RBrace { b"rBrace" }
+        Tok.LBracket { b"lBracket" }
+        Tok.RBracket { b"rBracket" }
+        Tok.Eof { b"eof" }
+    }
+    return name
+}

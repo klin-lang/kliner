@@ -1,9 +1,15 @@
 #!/bin/sh
-# Build and run the runtime demos in tests/rt with Klin (stage1:
-# -I rt/bootstrap -I rt) and check their output. Linux x86-64.
+# Build Kliner pieces with Klin (stage1: -I rt/bootstrap -I rt) and check
+# them. Linux x86-64.
+#   1. runtime demos in tests/rt (stage 1)
+#   2. lexer (stage 2): tools/kliner-lex against the goldens in tests/lex,
+#      and — when a Klin checkout and dart are available — against Klin's
+#      own lexer (tools/klin-lex.dart) on every .kl file of Kliner and of
+#      the Klin checkout.
 #
-#   scripts/test.sh                 # klin from PATH
-#   KLIN=/path/to/klin scripts/test.sh
+#   scripts/test.sh                 # klin from PATH, no Klin comparison
+#   KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
+#   DART=/path/to/dart              # default: dart from PATH
 #
 # Each demo is tests/rt/<name>/main.kl (one directory each: Klin merges
 # the files of a directory into one module). `klin main.kl` builds
@@ -17,12 +23,15 @@ trap 'rm -rf "$TMP"' EXIT
 fail=0
 pass=0
 
-build() { # name
+build() { # name [dir [klin args...]]
+    name=$1
     dir="$ROOT/tests/rt/$1"
+    [ $# -ge 2 ] && { dir="$ROOT/$2"; shift; }
+    shift
     rm -rf "$dir/out"
-    (cd "$dir" && "$KLIN" -I "$ROOT/rt/bootstrap" -I "$ROOT/rt" main.kl) >"$TMP/$1.build" 2>&1
+    (cd "$dir" && "$KLIN" -I "$ROOT/rt/bootstrap" -I "$ROOT/rt" "$@" main.kl) >"$TMP/$name.build" 2>&1
     if [ ! -x "$dir/out/main" ]; then
-        echo "FAIL build $1"; sed 's/^/  /' "$TMP/$1.build"; fail=$((fail + 1)); return 1
+        echo "FAIL build $name"; sed 's/^/  /' "$TMP/$name.build"; fail=$((fail + 1)); return 1
     fi
     BIN="$dir/out/main"
 }
@@ -102,6 +111,60 @@ if build cat; then
     check cat-eisdir 1 "$TMP/empty" "$TMP/eisdir.err" -- "$CAT" "$TMP"
     printf 'usage: cat IN [OUT]\n' >"$TMP/usage.err"
     check cat-usage 2 "$TMP/empty" "$TMP/usage.err" -- "$CAT"
+fi
+
+# --- stage 2: lexer ---------------------------------------------------
+# Goldens: tests/lex/NAME.kl -> NAME.tok. ok_* / err_* were written by
+# Klin's lexer (tools/klin-lex.dart); err_* exit 1. div_* are known
+# differences from Klin (README in tests/lex): the golden is Kliner's
+# output and they are left out of the Klin comparison.
+if build kliner-lex tools/kliner-lex -I "$ROOT/src"; then
+    LEX=$BIN
+    for f in "$ROOT"/tests/lex/*.kl; do
+        n=$(basename "$f" .kl)
+        rc=0
+        case $n in err_*) rc=1 ;; esac
+        check "lex $n" $rc "$ROOT/tests/lex/$n.tok" "$TMP/empty" -- "$LEX" "$f"
+    done
+    printf 'usage: kliner-lex FILE\n' >"$TMP/lexusage.err"
+    check "lex usage" 2 "$TMP/empty" "$TMP/lexusage.err" -- "$LEX"
+    printf 'error: ENOENT\n' >"$TMP/lexenoent.err"
+    check "lex enoent" 2 "$TMP/empty" "$TMP/lexenoent.err" -- "$LEX" "$TMP/no/such.kl"
+
+    # Same files through Klin's lexer: identical dump and exit code.
+    DART=${DART:-dart}
+    if [ -n "${KLIN_SRC:-}" ] && [ -f "$KLIN_SRC/lib/lexer.dart" ] && command -v "$DART" >/dev/null 2>&1; then
+        printf '{"configVersion":2,"packages":[{"name":"klin","rootUri":"file://%s/lib/","packageUri":"./"}]}\n' \
+            "$(cd "$KLIN_SRC" && pwd)" >"$TMP/pkg.json"
+        if "$DART" compile exe --packages="$TMP/pkg.json" "$ROOT/tools/klin-lex.dart" -o "$TMP/klin-lex" >"$TMP/dart.build" 2>&1; then
+            # vs_klin LABEL FILE...: one check over many files
+            vs_klin() {
+                label=$1; shift
+                nf=0 bad=0
+                for f in "$@"; do
+                    case $(basename "$f") in div_*.kl) continue ;; esac
+                    nf=$((nf + 1))
+                    "$TMP/klin-lex" "$f" >"$TMP/d.tok" 2>&1; a=$?
+                    "$LEX" "$f" >"$TMP/k.tok" 2>&1; b=$?
+                    if [ $a != $b ] || ! cmp -s "$TMP/d.tok" "$TMP/k.tok"; then
+                        bad=$((bad + 1))
+                        echo "  differs: $f (exit klin $a, kliner $b)"
+                        diff "$TMP/d.tok" "$TMP/k.tok" | head -6 | sed 's/^/    /'
+                    fi
+                done
+                if [ $bad = 0 ]; then echo "ok   lex = klin: $label ($nf files)"; pass=$((pass + 1));
+                else echo "FAIL lex = klin: $label ($bad of $nf files differ)"; fail=$((fail + 1)); fi
+            }
+            # Kliner's own sources, including tests/lex
+            vs_klin "kliner sources" $(find "$ROOT" -name '*.kl' -not -path '*/out/*' | sort)
+            # Klin's tests, examples, stdlib
+            vs_klin "klin checkout" $(find "$KLIN_SRC" -name '*.kl' -not -path '*/out/*' -not -path '*/.dart_tool/*' | sort)
+        else
+            echo "FAIL build klin-lex.dart"; sed 's/^/  /' "$TMP/dart.build"; fail=$((fail + 1))
+        fi
+    else
+        echo "skip lex = klin (set KLIN_SRC to a Klin checkout, dart on PATH or DART)"
+    fi
 fi
 
 echo "$pass passed, $fail failed"
