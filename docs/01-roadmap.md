@@ -62,10 +62,14 @@ Proposal: [02-core-subset.md](02-core-subset.md).
 
 ## 6. x86-64 backend + ELF64 writer
 
-- [ ] x86-64 instruction encoder
-- [ ] Codegen: locals in stack slots, constant folding, immediates, fused compare + branch
-- [ ] ELF64 writer (static executable, no libc)
-- [ ] **Milestone: hello world without libc**
+- [x] x86-64 instruction encoder — `src/x64/enc.kl` ([06-x86-64.md](06-x86-64.md))
+- [x] Codegen from the IR: locals in stack slots, no register allocator — `src/x64/gen.kl`; small copies / zeroing inline, fall-through jumps dropped
+- [ ] Constant folding, immediates, fused compare + branch — moved to stage 7 (with the register allocator)
+- [x] ELF64 writer (static executable, no libc, no external linker; `.symtab` for objdump / gdb) — `src/x64/elf.kl`, `tools/kliner-build`
+- [x] **Milestone: hello world without libc** (`tests/rt/hello`: 18 KB static ELF64, no `PT_INTERP`, no dynamic section)
+- [x] Backend goldens: `tests/ir` (= Klin = kliner-run), `tests/x64` (C13 edges), `tests/rt` hello / alloc / args / cat, traps
+- [x] Kliner's lexer, parser, checker, IR dump, interpreter and `kliner-build` compiled by `kliner-build`: output identical to the Klin-built tools; `kliner-build` rebuilds itself byte for byte
+- [ ] Decisions C14 (backend): PROPOSED
 
 ## 7. Fuller language
 
@@ -74,6 +78,11 @@ Proposal: [02-core-subset.md](02-core-subset.md).
 - [ ] `defer`
 - [ ] Slices
 - [ ] Linear scan register allocation
+- [ ] Constant folding, immediate operands, fused compare + branch (from stage 6)
+
+(Structs, `!T`, `defer` and slices already go through the IR and the
+x86-64 backend since stages 5–6; what stays open here is the rest of
+Klin — floats, `$fn`, interpolation, `pick`, `async`.)
 
 ## 8. Self-hosting
 
@@ -81,6 +90,10 @@ Proposal: [02-core-subset.md](02-core-subset.md).
 - [ ] stage2: built by stage1
 - [ ] stage3: built by stage2
 - [ ] **stage2 == stage3, byte for byte**
+
+(Stage 6 already has this for `kliner-build`: Klin-built → native
+stage 2 → stage 3, stage 2 == stage 3 byte for byte. PROPOSED: tick
+the boxes once Marek accepts `kliner-build` as "Kliner".)
 
 ## 9. More targets
 

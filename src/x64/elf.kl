@@ -1,0 +1,230 @@
+// elf.kl: the static ELF64 executable — no interpreter, no dynamic
+// section, no libc, no external linker. Layout (docs/06-x86-64.md):
+//   file 0: ELF header, 3 program headers, then the code (.text);
+//   PT_LOAD R+X  vaddr 0x400000 covering the header and the code;
+//   PT_LOAD R+W  vaddr 0x10000000 + file offset: .data (string
+//                literals), then .bss (the globals, zero-filled);
+//   PT_GNU_STACK RW (non-executable stack);
+//   then .symtab / .strtab / .shstrtab and the section headers, for
+//   readelf / objdump / gdb (not loaded).
+module x64
+import arena
+import ir
+
+pub const TEXT_VA: i64 = 0x400000
+pub const DATA_VA: i64 = 0x10000000
+const HDR: i64 = 64 + 3 * 56
+
+struct Buf {
+    b: []u8
+    n: i32
+}
+
+fn w1(o: *mut Buf, v: i64) {
+    (*o).b[(*o).n] = cast(u8, v & 0xff)
+    (*o).n += 1
+}
+
+fn w2(o: *mut Buf, v: i64) {
+    w1(o, v)
+    w1(o, v >> 8)
+}
+
+fn w4(o: *mut Buf, v: i64) {
+    w2(o, v)
+    w2(o, v >> 16)
+}
+
+fn w8(o: *mut Buf, v: i64) {
+    w4(o, v)
+    w4(o, v >> 32)
+}
+
+fn wbytes(o: *mut Buf, s: []u8) {
+    for i in 0..<s.len {
+        w1(o, cast(i64, s[i]))
+    }
+}
+
+fn pad(o: *mut Buf, al: i32) {
+    while (*o).n % al != 0 {
+        w1(o, 0)
+    }
+}
+
+fn phdr(o: *mut Buf, typ: i64, flags: i64, off: i64, va: i64, fsz: i64, msz: i64, al: i64) {
+    w4(o, typ)
+    w4(o, flags)
+    w8(o, off)
+    w8(o, va)
+    w8(o, va)
+    w8(o, fsz)
+    w8(o, msz)
+    w8(o, al)
+}
+
+fn shdr(o: *mut Buf, name: i64, typ: i64, flags: i64, va: i64, off: i64, size: i64, link: i64, info: i64, al: i64, es: i64) {
+    w4(o, name)
+    w4(o, typ)
+    w8(o, flags)
+    w8(o, va)
+    w8(o, off)
+    w8(o, size)
+    w4(o, link)
+    w4(o, info)
+    w8(o, al)
+    w8(o, es)
+}
+
+fn sym(o: *mut Buf, name: i64, info: i64, shndx: i64, value: i64, size: i64) {
+    w4(o, name)
+    w1(o, info)
+    w1(o, 0)
+    w2(o, shndx)
+    w8(o, value)
+    w8(o, size)
+}
+
+fn strz(o: *mut Buf, s: []u8): i64 {
+    let at = cast(i64, (*o).n)
+    wbytes(o, s)
+    w1(o, 0)
+    return at
+}
+
+const SHSTR: []u8 = b"\0.text\0.data\0.bss\0.symtab\0.strtab\0.shstrtab\0"
+
+fn helper_name(h: i32): []u8 {
+    if h == H_MEMMOVE {
+        return b"kliner.memmove"
+    }
+    if h == H_TRAP1 {
+        return b"kliner.trap.div0"
+    }
+    if h == H_TRAP2 {
+        return b"kliner.trap.noreturn"
+    }
+    if h == H_TRAP3 {
+        return b"kliner.trap.nullfn"
+    }
+    if h == H_TRAP4 {
+        return b"kliner.trap.overflow"
+    }
+    if h == H_TRAP5 {
+        return b"kliner.trap.segv"
+    }
+    if h == H_SEGV {
+        return b"kliner.sigsegv"
+    }
+    return b"_start"
+}
+
+// The executable image of a generated program (after gen).
+pub fn image(c: *mut Cg): ![]u8 {
+    let g = (*c).g
+    let code = cast(i64, (*c).n)
+    let doff = (HDR + code + 15) / 16 * 16
+    let nd = cast(i64, (*g).nd)
+    let dsize = (nd + 15) / 16 * 16
+    let dva = DATA_VA + doff
+    let bva = dva + dsize
+    // data / globals fixups
+    for i in 0..<(*c).nf {
+        let x = (*c).fix[i]
+        let from = TEXT_VA + HDR + cast(i64, x.pos) + 4
+        if x.kind == FX_DATA {
+            put32(c, x.pos, dva + x.tgt - from)
+        } else if x.kind == FX_BSS {
+            put32(c, x.pos, bva + x.tgt - from)
+        }
+    }
+    // symbols: functions with code (local), helpers, _start (global)
+    let mut nsym = 1
+    let mut strsize: i64 = 1
+    for i in 0..<(*g).nfn + 1 {
+        if (*c).fpos[i] >= 0 {
+            nsym += 1
+            strsize += cast(i64, (*g).fns[i].name.len) + 1
+        }
+    }
+    for h in 0..<NHELP {
+        nsym += 1
+        strsize += cast(i64, helper_name(h).len) + 1
+    }
+    let total = doff + dsize + strsize + cast(i64, nsym) * 24 + cast(i64, SHSTR.len) + 7 * 64 + 64
+    if total > 0x7fff0000 {
+        madd(c, b"output too large")
+        return error(E_X64)
+    }
+    let mut o: Buf
+    o.b = arena.alloc_u8((*c).a, cast(i32, total))!
+    o.n = 0
+    // .strtab first into a scratch area: build it after the symbols' offsets
+    let mut st: Buf
+    st.b = arena.alloc_u8((*c).a, cast(i32, strsize))!
+    st.n = 0
+    w1(&st, 0)
+    let mut sy: Buf
+    sy.b = arena.alloc_u8((*c).a, nsym * 24)!
+    sy.n = 0
+    sym(&sy, 0, 0, 0, 0, 0)
+    for i in 0..<(*g).nfn + 1 {
+        if (*c).fpos[i] >= 0 {
+            let nm = strz(&st, (*g).fns[i].name)
+            let at = TEXT_VA + HDR + cast(i64, (*c).fpos[i])
+            sym(&sy, nm, 0x02, 1, at, cast(i64, (*c).fend[i] - (*c).fpos[i])) // LOCAL FUNC
+        }
+    }
+    for h in 0..<H_START {
+        let nm = strz(&st, helper_name(h))
+        sym(&sy, nm, 0x02, 1, TEXT_VA + HDR + cast(i64, (*c).hpos[h]), cast(i64, (*c).hend[h] - (*c).hpos[h]))
+    }
+    let nm = strz(&st, helper_name(H_START))
+    let entry = TEXT_VA + HDR + cast(i64, (*c).hpos[H_START])
+    sym(&sy, nm, 0x12, 1, entry, cast(i64, (*c).hend[H_START] - (*c).hpos[H_START])) // GLOBAL FUNC
+    let soff = doff + dsize
+    let stroff = soff + cast(i64, nsym) * 24
+    let shoff_str = stroff + cast(i64, st.n)
+    let shoff = (shoff_str + cast(i64, SHSTR.len) + 7) / 8 * 8
+    // ELF header
+    w1(&o, 0x7f)
+    wbytes(&o, b"ELF")
+    w1(&o, 2) // 64-bit
+    w1(&o, 1) // little endian
+    w1(&o, 1) // version
+    w1(&o, 0) // System V ABI
+    w8(&o, 0)
+    w2(&o, 2) // ET_EXEC
+    w2(&o, 62) // EM_X86_64
+    w4(&o, 1)
+    w8(&o, entry)
+    w8(&o, 64) // phoff
+    w8(&o, shoff)
+    w4(&o, 0) // flags
+    w2(&o, 64) // ehsize
+    w2(&o, 56) // phentsize
+    w2(&o, 3) // phnum
+    w2(&o, 64) // shentsize
+    w2(&o, 7) // shnum
+    w2(&o, 6) // shstrndx
+    phdr(&o, 1, 5, 0, TEXT_VA, HDR + code, HDR + code, 0x1000) // PT_LOAD R X
+    phdr(&o, 1, 6, doff, dva, nd, dsize + (*g).gsize, 0x1000) // PT_LOAD R W
+    phdr(&o, 0x6474e551, 6, 0, 0, 0, 0, 16) // PT_GNU_STACK RW
+    wbytes(&o, (*c).b[0:(*c).n])
+    pad(&o, 16)
+    wbytes(&o, (*g).data[0:(*g).nd])
+    pad(&o, 16)
+    wbytes(&o, sy.b[0:sy.n])
+    wbytes(&o, st.b[0:st.n])
+    wbytes(&o, SHSTR)
+    pad(&o, 8)
+    // section headers: null .text .data .bss .symtab .strtab .shstrtab
+    shdr(&o, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    shdr(&o, 1, 1, 6, TEXT_VA + HDR, HDR, code, 0, 0, 16, 0) // PROGBITS AX
+    shdr(&o, 7, 1, 3, dva, doff, nd, 0, 0, 16, 0) // PROGBITS WA
+    shdr(&o, 13, 8, 3, bva, doff + dsize, (*g).gsize, 0, 0, 16, 0) // NOBITS WA
+    shdr(&o, 18, 2, 0, 0, soff, cast(i64, sy.n), 5, cast(i64, nsym - 1), 8, 24) // SYMTAB, first global
+    shdr(&o, 26, 3, 0, 0, stroff, cast(i64, st.n), 0, 0, 1, 0) // STRTAB
+    shdr(&o, 34, 3, 0, 0, shoff_str, cast(i64, SHSTR.len), 0, 0, 1, 0)
+    return o.b[0:o.n]
+}
