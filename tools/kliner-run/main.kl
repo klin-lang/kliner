@@ -1,0 +1,148 @@
+module main
+import arena
+import check
+import diag
+import ir
+import sys
+import vm
+import lex
+import load
+import os
+import out
+
+// kliner-run: interprets a program through the IR — stage 5 tool (docs/05-ir.md).
+struct Ctx {
+    a: arena.Arena
+    o: out.Out
+    e: out.Out
+    p: load.Prog
+}
+
+fn report_load(c: *mut Ctx) {
+    let p = &(*c).p
+    let o = &(*c).e
+    if (*p).kind == 1 {
+        let f = load.file(p, (*p).err_file)
+        diag.write_short(&(*f).d, o)
+        return
+    }
+    if (*p).kind == 2 {
+        let f = load.file(p, (*p).err_file)
+        if (*p).err_tok < 0 {
+            (*o).lit(b"1:1: ")
+        } else {
+            let [ln, col] = diag.pos(&(*f).d, (*f).lx.toks[(*p).err_tok].start)
+            (*o).dec(cast(i64, ln))
+            (*o).lit(b":")
+            (*o).dec(cast(i64, col))
+            (*o).lit(b": ")
+        }
+        (*o).lit(load.message(p))
+        (*o).nl()
+        return
+    }
+    (*o).lit(b"error: ")
+    (*o).lit(load.message(p))
+    (*o).lit(b": ")
+    (*o).lit((*p).err_path)
+    (*o).nl()
+}
+
+fn report_check(c: *mut Ctx, k: *mut check.Ck) {
+    let o = &(*c).e
+    let ef = check.err_file(k)
+    let et = check.err_tok(k)
+    if ef < 0 || et < 0 {
+        (*o).lit(b"1:1: ")
+    } else {
+        let f = load.file(&(*c).p, ef)
+        let [ln, col] = diag.pos(&(*f).d, (*f).lx.toks[et].start)
+        (*o).dec(cast(i64, ln))
+        (*o).lit(b":")
+        (*o).dec(cast(i64, col))
+        (*o).lit(b": ")
+    }
+    (*o).lit(check.message(k))
+    (*o).nl()
+}
+
+fn report_ir(c: *mut Ctx, g: *mut ir.Prog) {
+    let o = &(*c).e
+    if (*g).ef < 0 || (*g).etok < 0 {
+        (*o).lit(b"1:1: ")
+    } else {
+        let f = load.file(&(*c).p, (*g).ef)
+        let [ln, col] = diag.pos(&(*f).d, (*f).lx.toks[(*g).etok].start)
+        (*o).dec(cast(i64, ln))
+        (*o).lit(b":")
+        (*o).dec(cast(i64, col))
+        (*o).lit(b": ")
+    }
+    (*o).lit(ir.message(g))
+    (*o).nl()
+}
+
+fn run(c: *mut Ctx): !i32 {
+    let mut ok = 0
+    (*c).a = arena.Arena.new(1 << 30)!
+    let args = os.args(&(*c).a)!
+    (*c).p = load.Prog.new(&(*c).a)!
+    let mut entry = -1
+    let mut i = 1
+    while i < args.list.len && entry < 0 {
+        if lex.eq(args.list[i], b"-I") && i + 1 < args.list.len {
+            ok = load.include(&(*c).p, args.list[i + 1])!
+            i += 2
+        } else {
+            entry = i
+            i += 1
+        }
+    }
+    if entry < 0 {
+        (*c).e.lit(b"usage: kliner-run [-I DIR]... FILE.kl [ARG]...")
+        (*c).e.nl()
+        return 2
+    }
+    let m = load.run(&(*c).p, args.list[entry]) or {
+        if err != load.E_LOAD {
+            return error(err)
+        }
+        report_load(c)
+        return 1
+    }
+    let mut k = check.Ck.new(&(*c).a, &(*c).p, true)!
+    ok = check.run(&k) or {
+        if err != check.E_CHECK {
+            return error(err)
+        }
+        report_check(c, &k)
+        return 1
+    }
+    let mut g = ir.Prog.new(&(*c).a, (*c).p.funcs.n, (*c).p.globals.n)!
+    ok = ir.lower(&(*c).a, &k, &(*c).p, &g) or {
+        if err != ir.E_IR {
+            return error(err)
+        }
+        report_ir(c, &g)
+        return 1
+    }
+    // the program's argv: FILE.kl and the arguments after it
+    let z = args.arg_z(entry)
+    let from = cast(i32, sys.addr_u8(z) - sys.addr_u8(args.bytes))
+    let mut v = vm.Vm.new(&(*c).a, &g, args.bytes[from:args.bytes.len])!
+    (*c).e.flush_quiet()
+    return vm.run(&v, &(*c).a)!
+}
+
+fn main() {
+    let mut c: Ctx
+    c.e = out.Out.stderr()
+    let code = run(&c) or {
+        c.e.lit(b"kliner-run: error: ")
+        c.e.errno_name(err)
+        c.e.nl()
+        2
+    }
+    c.e.flush_quiet()
+    os.exit(code)
+}

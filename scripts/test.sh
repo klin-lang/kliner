@@ -12,6 +12,11 @@
 #   4. checker (stage 4): tools/kliner-check against the goldens in
 #      tests/check and — same conditions, plus KLIN_SRC/.dart_tool — against
 #      Klin's own checker (tools/klin-check.dart).
+#   5. IR + interpreter (stage 5): tools/kliner-run runs the tests/rt
+#      demos and the tests/ir programs (goldens: stdout + exit code, the
+#      same as the Klin-built binaries), kliner-ir dumps tests/ir/only/dump,
+#      and kliner-lex / kliner-parse / kliner-check / kliner-ir run under
+#      kliner-run give the same output as their Klin-built binaries.
 #
 #   scripts/test.sh                 # klin from PATH, no Klin comparison
 #   KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
@@ -218,7 +223,7 @@ if build kliner-parse tools/kliner-parse -I "$ROOT/src"; then
                     if [ $a = 0 ] && [ $b = 1 ] && grep -q ': string interpolation is not supported by Kliner yet$' "$TMP/k.ast"; then
                         interp=$((interp + 1)); continue
                     fi
-                    case $f in */rt/linux_x86_64/sys.kl) if [ $b = 0 ]; then sys=$((sys + 1)); continue; fi ;; esac
+                    case $f in */rt/linux_x86_64/sys.kl|*/tests/ir/only/unsup/lib/sys.kl) if [ $b = 0 ]; then sys=$((sys + 1)); continue; fi ;; esac
                     bad=$((bad + 1))
                     echo "  differs: $f (exit klin $a, kliner $b)"
                     diff "$TMP/d.ast" "$TMP/k.ast" | head -6 | sed 's/^/    /'
@@ -285,7 +290,7 @@ if build kliner-check tools/kliner-check -I "$ROOT/src"; then
                     if [ $a = $b ] && cmp -s "$TMP/d.chk" "$TMP/k.chk"; then continue; fi
                     if [ $b = 1 ] && grep -q 'not supported by Kliner yet' "$TMP/k.chk"; then uns=$((uns + 1)); continue; fi
                     if [ $b = 1 ] && grep -q 'unexpected character `\$`' "$TMP/k.chk"; then mac=$((mac + 1)); continue; fi
-                    case $f in */rt/linux_x86_64/sys.kl) if [ $b = 0 ]; then sys=$((sys + 1)); continue; fi ;; esac
+                    case $f in */rt/linux_x86_64/sys.kl|*/tests/ir/only/unsup/lib/sys.kl) if [ $b = 0 ]; then sys=$((sys + 1)); continue; fi ;; esac
                     bad=$((bad + 1))
                     echo "  differs: $f (exit klin $a, kliner $b)"
                     echo "    klin:   $(head -1 "$TMP/d.chk")"
@@ -297,7 +302,7 @@ if build kliner-check tools/kliner-check -I "$ROOT/src"; then
                 else echo "FAIL check = klin: $label ($bad of $nf files differ)"; fail=$((fail + 1)); fi
             }
             vs_klin_check "goldens" "" "$ROOT"/tests/check/*.kl "$ROOT"/tests/check/klin/*.kl "$ROOT"/tests/check/*/main.kl
-            vs_klin_check "kliner programs" "" "$ROOT"/tools/kliner-*/main.kl "$ROOT"/tests/rt/*/main.kl
+            vs_klin_check "kliner programs" "" "$ROOT"/tools/kliner-*/main.kl "$ROOT"/tests/rt/*/main.kl "$ROOT"/tests/ir/*/main.kl
             vs_klin_check "kliner modules (--lib)" --lib $(find "$ROOT/src" "$ROOT/rt" -name '*.kl' | sort)
             vs_klin_check "klin checkout" "" $(find "$KLIN_SRC" -name '*.kl' -not -path '*/out/*' -not -path '*/.dart_tool/*' | sort)
         else
@@ -305,6 +310,91 @@ if build kliner-check tools/kliner-check -I "$ROOT/src"; then
         fi
     else
         echo "skip check = klin (set KLIN_SRC to a Klin checkout with .dart_tool from \`dart pub get\`, dart on PATH or DART)"
+    fi
+fi
+
+# --- stage 5: IR and interpreter --------------------------------------
+# Interpreted programs use the real runtime (rt/linux_x86_64: sys.call6
+# without a body = the Sys instruction), Klin builds use rt/bootstrap.
+if build kliner-ir tools/kliner-ir -I "$ROOT/src"; then
+    IRD=$BIN
+    printf 'usage: kliner-ir [-I DIR]... FILE\n' >"$TMP/irusage.err"
+    check ir-usage 2 "$TMP/empty" "$TMP/irusage.err" -- "$IRD"
+    check ir-dump 0 "$ROOT/tests/ir/only/dump/out.ir" "$TMP/empty" -- "$IRD" "$ROOT/tests/ir/only/dump/main.kl"
+fi
+if build kliner-run tools/kliner-run -I "$ROOT/src"; then
+    RUN=$BIN
+    run() { "$RUN" -I "$ROOT/rt/linux_x86_64" -I "$ROOT/rt" -I "$ROOT/src" "$@"; }
+    printf 'usage: kliner-run [-I DIR]... FILE.kl [ARG]...\n' >"$TMP/runusage.err"
+    check run-usage 2 "$TMP/empty" "$TMP/runusage.err" -- "$RUN"
+    # the stage-1 demos, same expectations as their compiled versions
+    [ -f "$TMP/hello.out" ] && check run-hello 3 "$TMP/hello.out" "$TMP/hello.err" -- run "$ROOT/tests/rt/hello/main.kl"
+    [ -f "$TMP/alloc.out" ] && check run-alloc 0 "$TMP/alloc.out" "$TMP/empty" -- run "$ROOT/tests/rt/alloc/main.kl"
+    [ -f "$TMP/args.out" ] && check run-args 0 "$TMP/args.out" "$TMP/empty" -- run "$ROOT/tests/rt/args/main.kl" "a b" "" "zażółć" x
+    if [ -f "$TMP/cat.err" ]; then
+        check run-cat 0 "$TMP/in.txt" "$TMP/cat.err" -- run "$ROOT/tests/rt/cat/main.kl" "$TMP/in.txt"
+        check run-cat-big 0 "$TMP/big.txt" "$TMP/big.err" -- run "$ROOT/tests/rt/cat/main.kl" "$TMP/big.txt"
+        rm -f "$TMP/copy2"
+        check run-cat-write 0 "$TMP/empty" "$TMP/cat.err" -- run "$ROOT/tests/rt/cat/main.kl" "$TMP/in.txt" "$TMP/copy2"
+        if cmp -s "$TMP/in.txt" "$TMP/copy2"; then echo "ok   run-cat-copy"; pass=$((pass + 1)); else echo "FAIL run-cat-copy"; fail=$((fail + 1)); fi
+        check run-cat-enoent 1 "$TMP/empty" "$TMP/enoent.err" -- run "$ROOT/tests/rt/cat/main.kl" "$TMP/no/such/file"
+    fi
+    # tests/ir/NAME/main.kl (arguments: x y): main.out is stdout plus
+    # "exit N"; the Klin-built binary must give the same.
+    for d in "$ROOT"/tests/ir/*/; do
+        n=$(basename "$d")
+        [ -f "$d/main.out" ] || continue
+        run "$d/main.kl" x y >"$TMP/ir.out" 2>&1 </dev/null; echo "exit $?" >>"$TMP/ir.out"
+        if cmp -s "$TMP/ir.out" "$d/main.out"; then echo "ok   run $n"; pass=$((pass + 1));
+        else echo "FAIL run $n"; diff "$d/main.out" "$TMP/ir.out" | head -20 | sed 's/^/  /'; fail=$((fail + 1)); fi
+        if build "ir-$n" "tests/ir/$n"; then
+            "$BIN" x y >"$TMP/irk.out" 2>&1 </dev/null; echo "exit $?" >>"$TMP/irk.out"
+            if cmp -s "$TMP/irk.out" "$d/main.out"; then echo "ok   klin $n = golden"; pass=$((pass + 1));
+            else echo "FAIL klin $n = golden"; diff "$d/main.out" "$TMP/irk.out" | head -20 | sed 's/^/  /'; fail=$((fail + 1)); fi
+        fi
+    done
+    # kliner-run only: division by zero traps; a body-less call is rejected
+    printf 'before\n' >"$TMP/trap.out"
+    printf 'kliner-run: trap: division by zero\n' >"$TMP/trap.err"
+    check run-trap 134 "$TMP/trap.out" "$TMP/trap.err" -- run "$ROOT/tests/ir/only/trap/main.kl"
+    : >"$TMP/deep.out"
+    printf 'kliner-run: trap: stack overflow\n' >"$TMP/deep.err"
+    check run-deep 134 "$TMP/deep.out" "$TMP/deep.err" -- run "$ROOT/tests/ir/only/deep/main.kl"
+    printf '7:27: calling `sys.nope` (a function without a body) is not supported yet\n' >"$TMP/unsup.err"
+    check run-unsup 1 "$TMP/empty" "$TMP/unsup.err" -- "$RUN" -I "$ROOT/tests/ir/only/unsup/lib" -I "$ROOT/rt" "$ROOT/tests/ir/only/unsup/main.kl"
+    # Kliner's own tools under the interpreter = their Klin-built binaries
+    self_run() { # label tool binary files...
+        label=$1 tool=$2 bin=$3; shift 3
+        bad=0 nf=0
+        for f in "$@"; do
+            nf=$((nf + 1))
+            "$bin" "$f" >"$TMP/s1" 2>&1; a=$?
+            run "$ROOT/tools/$tool/main.kl" "$f" >"$TMP/s2" 2>&1; b=$?
+            if [ $a != $b ] || ! cmp -s "$TMP/s1" "$TMP/s2"; then bad=$((bad + 1)); echo "  differs: $f"; fi
+        done
+        if [ $bad = 0 ]; then echo "ok   self: $label ($nf files)"; pass=$((pass + 1));
+        else echo "FAIL self: $label ($bad of $nf files differ)"; fail=$((fail + 1)); fi
+    }
+    SRCS=$(find "$ROOT/src" "$ROOT/rt" "$ROOT/tools" "$ROOT/tests/rt" "$ROOT/tests/ir" -name '*.kl' -not -path '*/out/*' | sort)
+    [ -n "${LEX:-}" ] && self_run "kliner-lex under kliner-run" kliner-lex "$LEX" $SRCS "$ROOT"/tests/lex/*.kl
+    [ -n "${PARSE:-}" ] && self_run "kliner-parse under kliner-run" kliner-parse "$PARSE" $SRCS "$ROOT"/tests/parse/*.kl
+    if [ -n "${CHECK:-}" ]; then
+        CI="-I $ROOT/src -I $ROOT/rt -I $ROOT/rt/bootstrap"
+        "$CHECK" $CI "$ROOT/tools/kliner-run/main.kl" >"$TMP/s1" 2>&1; a=$?
+        run "$ROOT/tools/kliner-check/main.kl" $CI "$ROOT/tools/kliner-run/main.kl" >"$TMP/s2" 2>&1; b=$?
+        "$CHECK" "$ROOT/tests/check/err_01.kl" >"$TMP/s3" 2>&1; c=$?
+        run "$ROOT/tools/kliner-check/main.kl" "$ROOT/tests/check/err_01.kl" >"$TMP/s4" 2>&1; d=$?
+        if [ $a = $b ] && [ $c = $d ] && cmp -s "$TMP/s1" "$TMP/s2" && cmp -s "$TMP/s3" "$TMP/s4"; then
+            echo "ok   self: kliner-check under kliner-run (kliner-run, err_01)"; pass=$((pass + 1));
+        else echo "FAIL self: kliner-check under kliner-run"; fail=$((fail + 1)); fi
+    fi
+    if [ -n "${IRD:-}" ]; then
+        RI="-I $ROOT/rt/linux_x86_64 -I $ROOT/rt -I $ROOT/src"
+        "$IRD" $RI "$ROOT/tools/kliner-run/main.kl" >"$TMP/s1" 2>&1; a=$?
+        run "$ROOT/tools/kliner-ir/main.kl" $RI "$ROOT/tools/kliner-run/main.kl" >"$TMP/s2" 2>&1; b=$?
+        if [ $a = 0 ] && [ $b = 0 ] && cmp -s "$TMP/s1" "$TMP/s2"; then
+            echo "ok   self: kliner-ir under kliner-run (IR of kliner-run, $(wc -l <"$TMP/s1" | tr -d ' ') lines)"; pass=$((pass + 1));
+        else echo "FAIL self: kliner-ir under kliner-run"; fail=$((fail + 1)); fi
     fi
 fi
 

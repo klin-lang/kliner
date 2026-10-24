@@ -123,6 +123,9 @@ K-B1 and K-B2 were reported to the Klin bot on 2026-10-24 (C12.2).
   (`main.kl:/abs/m.kl:2:10: …`). Also for the entry file itself: a
   lexer or parser error prints `r7.kl:/tmp/sp/r7.kl:2:9: expected
   variable name` (`fn main() {` / `let = 1` / `}`).
+- **K-B4** (stage 5) narrow-integer arithmetic is not wrapped to its
+  type (`u8` `129 << 1` is 258): repro in
+  [05-ir.md](05-ir.md#differences-from-klin-klin--c--gcc).
 - **K-B4** (found with `str`, 2026-10-24) a zero-initialised `str` is a
   NULL `const char *`; `s.len` (`strlen`), `s[i]` and `cstr_u8(s)` then
   crash (SIGSEGV, exit 139). The checker accepts it:

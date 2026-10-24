@@ -1,0 +1,468 @@
+// module vm — the IR interpreter (stage 5, docs/05-ir.md). Memory is the
+// host's: the program's frames live in one mmap'd stack, its globals and
+// string data in the arena, and loads / stores go straight to the
+// addresses (the program mmaps its own arenas through syscalls, which
+// pass through to the kernel). Registers are i64 per frame, normalized
+// to the width of the writing instruction. A call is a host call (exec
+// recursion). One syscall is emulated: openat("/proc/self/cmdline")
+// gives a memfd with the program's own argv (the FILE.kl path, then the
+// arguments after it), so os.args works.
+module vm
+import arena
+import ir
+import os
+import out
+import sys
+
+const STACK: i64 = 1 << 28
+const NREGS: i64 = 1 << 24
+// Interpreted calls nest host calls of exec (about 400 bytes of the 8 MiB
+// host stack each); deeper recursion traps instead of crashing.
+const MAXDEPTH: i32 = 10000
+
+pub struct Vm {
+    g: *mut ir.Prog
+    globals: i64
+    data: i64
+    stack: i64 // base of the frame stack
+    sp: i64 // bytes used
+    regs: i64 // base of the register stack (i64 each)
+    rsp: i64 // registers used
+    cmdline: []u8 // argv, NUL-terminated each
+    depth: i32
+}
+
+fn mmap(n: i64): !i64 {
+    let r = sys.call6(sys.NR_MMAP, 0, n, os.PROT_READ | os.PROT_WRITE, os.MAP_PRIVATE | os.MAP_ANONYMOUS, -1, 0)
+    return os.check(r)!
+}
+
+pub fn Vm.new(a: *mut arena.Arena, g: *mut ir.Prog, cmdline: []u8): !Vm {
+    let mut v: Vm
+    v.g = g
+    v.globals = arena.alloc_addr(a, (*g).gsize + 16)!
+    v.data = sys.addr_u8((*g).data)
+    v.stack = mmap(STACK)!
+    v.regs = mmap(NREGS * 8)!
+    v.cmdline = cmdline
+    return v
+}
+
+fn trap(v: *mut Vm, msg: []u8) {
+    let mut e = out.Out.stderr()
+    e.lit(b"kliner-run: trap: ")
+    e.lit(msg)
+    e.nl()
+    e.flush_quiet()
+    os.exit(134)
+}
+
+fn norm(t: u8, x: i64): i64 {
+    match t {
+        0 {
+            return cast(i64, cast(i8, x))
+        }
+        1 {
+            return cast(i64, cast(i16, x))
+        }
+        2 {
+            return cast(i64, cast(i32, x))
+        }
+        4 {
+            return cast(i64, cast(u8, x))
+        }
+        5 {
+            return cast(i64, cast(u16, x))
+        }
+        6 {
+            return cast(i64, cast(u32, x))
+        }
+        else {
+            return x
+        }
+    }
+}
+
+fn ld(t: u8, p: i64): i64 {
+    match t {
+        0 {
+            return cast(i64, *cast(*i8, p))
+        }
+        1 {
+            return cast(i64, *cast(*i16, p))
+        }
+        2 {
+            return cast(i64, *cast(*i32, p))
+        }
+        4 {
+            return cast(i64, *cast(*u8, p))
+        }
+        5 {
+            return cast(i64, *cast(*u16, p))
+        }
+        6 {
+            return cast(i64, *cast(*u32, p))
+        }
+        else {
+            return *cast(*i64, p)
+        }
+    }
+}
+
+fn st(t: u8, p: i64, x: i64) {
+    match t {
+        0, 4 {
+            *cast(*mut u8, p) = cast(u8, x)
+        }
+        1, 5 {
+            *cast(*mut u16, p) = cast(u16, x)
+        }
+        2, 6 {
+            *cast(*mut u32, p) = cast(u32, x)
+        }
+        else {
+            *cast(*mut i64, p) = x
+        }
+    }
+}
+
+fn memmove(dst: i64, src: i64, n: i64) {
+    if dst == src || n <= 0 {
+        return
+    }
+    if dst < src || dst >= src + n {
+        let mut i: i64 = 0
+        while i + 8 <= n {
+            *cast(*mut i64, dst + i) = *cast(*i64, src + i)
+            i += 8
+        }
+        while i < n {
+            *cast(*mut u8, dst + i) = *cast(*u8, src + i)
+            i += 1
+        }
+        return
+    }
+    let mut j = n
+    while j > 0 {
+        j -= 1
+        *cast(*mut u8, dst + j) = *cast(*u8, src + j)
+    }
+}
+
+fn memzero(dst: i64, n: i64) {
+    let mut i: i64 = 0
+    while i + 8 <= n {
+        *cast(*mut i64, dst + i) = 0
+        i += 8
+    }
+    while i < n {
+        *cast(*mut u8, dst + i) = 0
+        i += 1
+    }
+}
+
+fn bits(t: u8): u64 {
+    return cast(u64, ir.tsize(t)) * 8
+}
+
+fn arith(v: *mut Vm, op: ir.Op, t: u8, a: i64, b: i64): i64 {
+    let ua = cast(u64, a)
+    let ub = cast(u64, b)
+    let sg = ir.is_signed(t)
+    match op {
+        ir.Op.Add {
+            return norm(t, cast(i64, ua + ub))
+        }
+        ir.Op.Sub {
+            return norm(t, cast(i64, ua - ub))
+        }
+        ir.Op.Mul {
+            return norm(t, cast(i64, ua * ub))
+        }
+        ir.Op.Div {
+            if b == 0 {
+                trap(v, b"division by zero")
+            }
+            if sg {
+                if b == -1 {
+                    return norm(t, cast(i64, cast(u64, 0) - ua))
+                }
+                return norm(t, a / b)
+            }
+            return norm(t, cast(i64, ua / ub))
+        }
+        ir.Op.Rem {
+            if b == 0 {
+                trap(v, b"division by zero")
+            }
+            if sg {
+                if b == -1 {
+                    return 0
+                }
+                return norm(t, a % b)
+            }
+            return norm(t, cast(i64, ua % ub))
+        }
+        ir.Op.And {
+            return a & b
+        }
+        ir.Op.Or {
+            return a | b
+        }
+        ir.Op.Xor {
+            return norm(t, a ^ b)
+        }
+        ir.Op.Shl {
+            if ub >= bits(t) {
+                return 0
+            }
+            return norm(t, cast(i64, ua << ub))
+        }
+        ir.Op.Shr {
+            if sg {
+                if ub >= bits(t) {
+                    if a < 0 {
+                        return -1
+                    }
+                    return 0
+                }
+                return a >> cast(i64, ub)
+            }
+            if ub >= bits(t) {
+                return 0
+            }
+            return cast(i64, ua >> ub)
+        }
+        ir.Op.Eq {
+            return pick_b(a == b)
+        }
+        ir.Op.Ne {
+            return pick_b(a != b)
+        }
+        ir.Op.Lt {
+            if sg {
+                return pick_b(a < b)
+            }
+            return pick_b(ua < ub)
+        }
+        ir.Op.Le {
+            if sg {
+                return pick_b(a <= b)
+            }
+            return pick_b(ua <= ub)
+        }
+        ir.Op.Gt {
+            if sg {
+                return pick_b(a > b)
+            }
+            return pick_b(ua > ub)
+        }
+        ir.Op.Ge {
+            if sg {
+                return pick_b(a >= b)
+            }
+            return pick_b(ua >= ub)
+        }
+        else {
+            return 0
+        }
+    }
+}
+
+fn pick_b(c: bool): i64 {
+    if c {
+        return 1
+    }
+    return 0
+}
+
+fn is_cmdline(p: i64): bool {
+    let want = b"/proc/self/cmdline\0"
+    for i in 0..<want.len {
+        if *cast(*u8, p + cast(i64, i)) != want[i] {
+            return false
+        }
+    }
+    return true
+}
+
+fn syscall(v: *mut Vm, r: i64, base: i32): i64 {
+    let g = (*v).g
+    let mut x: [7]i64
+    for i in 0..<7 {
+        x[i] = *cast(*i64, r + cast(i64, (*g).args[base + i]) * 8)
+    }
+    if x[0] == sys.NR_OPENAT && is_cmdline(x[2]) {
+        let name = b"cmdline\0"
+        let fd = sys.call6(319, sys.addr_u8(name), 0, 0, 0, 0, 0)
+        if fd < 0 {
+            return fd
+        }
+        let w = os.write_all(cast(i32, fd), (*v).cmdline) or {
+            return cast(i64, 0) - cast(i64, err)
+        }
+        let s = sys.call6(sys.NR_LSEEK, fd, 0, 0, 0, 0, 0)
+        return fd
+    }
+    return sys.call6(x[0], x[1], x[2], x[3], x[4], x[5], x[6])
+}
+
+// Runs function fi; its arguments are the registers listed at
+// args[ab .. ab + n) of the caller's register frame cr.
+fn exec(v: *mut Vm, fi: i32, cr: i64, ab: i32, n: i32): i64 {
+    let g = (*v).g
+    let f = (*g).fns[fi]
+    if f.kind != 0 {
+        trap(v, b"call of a function without a body")
+    }
+    let fp = (*v).stack + (*v).sp
+    let r = (*v).regs + (*v).rsp * 8
+    if (*v).sp + f.frame > STACK || (*v).rsp + cast(i64, f.nr) > NREGS || (*v).depth >= MAXDEPTH {
+        trap(v, b"stack overflow")
+    }
+    (*v).depth += 1
+    (*v).sp += f.frame
+    (*v).rsp += cast(i64, f.nr)
+    for i in 0..<n {
+        *cast(*mut i64, r + cast(i64, i) * 8) = *cast(*i64, cr + cast(i64, (*g).args[ab + i]) * 8)
+    }
+    let labs = (*g).labs[f.lab:f.lab + f.nl + 1]
+    let mut pc = f.start
+    let mut result: i64 = 0
+    let mut running = true
+    while running {
+        let x = (*g).ins[pc]
+        pc += 1
+        let pd = r + cast(i64, x.d) * 8
+        let pa = r + cast(i64, x.a) * 8
+        let pb = r + cast(i64, x.b) * 8
+        match x.op {
+            ir.Op.Nop, ir.Op.Label {
+            }
+            ir.Op.Const {
+                *cast(*mut i64, pd) = norm(x.t, x.k)
+            }
+            ir.Op.Slot {
+                *cast(*mut i64, pd) = fp + x.k
+            }
+            ir.Op.Glob {
+                *cast(*mut i64, pd) = (*v).globals + x.k
+            }
+            ir.Op.Data {
+                *cast(*mut i64, pd) = (*v).data + x.k
+            }
+            ir.Op.FnRef {
+                *cast(*mut i64, pd) = cast(i64, x.a) + 1
+            }
+            ir.Op.Mov {
+                *cast(*mut i64, pd) = *cast(*i64, pa)
+            }
+            ir.Op.Load {
+                *cast(*mut i64, pd) = ld(x.t, *cast(*i64, pa) + x.k)
+            }
+            ir.Op.Store {
+                st(x.t, *cast(*i64, pa) + x.k, *cast(*i64, pb))
+            }
+            ir.Op.Add, ir.Op.Sub, ir.Op.Mul, ir.Op.Div, ir.Op.Rem, ir.Op.And, ir.Op.Or, ir.Op.Xor, ir.Op.Shl, ir.Op.Shr, ir.Op.Eq, ir.Op.Ne, ir.Op.Lt, ir.Op.Le, ir.Op.Gt, ir.Op.Ge {
+                *cast(*mut i64, pd) = arith(v, x.op, x.t, *cast(*i64, pa), *cast(*i64, pb))
+            }
+            ir.Op.Neg {
+                *cast(*mut i64, pd) = norm(x.t, cast(i64, cast(u64, 0) - cast(u64, *cast(*i64, pa))))
+            }
+            ir.Op.Not {
+                *cast(*mut i64, pd) = norm(x.t, ~*cast(*i64, pa))
+            }
+            ir.Op.Conv {
+                *cast(*mut i64, pd) = norm(x.t, *cast(*i64, pa))
+            }
+            ir.Op.Copy {
+                memmove(*cast(*i64, pa), *cast(*i64, pb), x.k)
+            }
+            ir.Op.Zero {
+                memzero(*cast(*i64, pa), x.k)
+            }
+            ir.Op.Jmp {
+                pc = labs[x.a]
+            }
+            ir.Op.Br {
+                if *cast(*i64, pa) != 0 {
+                    pc = labs[x.b]
+                } else {
+                    pc = labs[x.c]
+                }
+            }
+            ir.Op.Call {
+                let res = exec(v, x.a, r, x.b, x.c)
+                if x.d >= 0 {
+                    *cast(*mut i64, pd) = norm(x.t, res)
+                }
+            }
+            ir.Op.CallInd {
+                let fv = *cast(*i64, pa)
+                if fv <= 0 || fv > cast(i64, (*g).nfn) {
+                    trap(v, b"call through a null or invalid fn value")
+                }
+                let res = exec(v, cast(i32, fv - 1), r, x.b, x.c)
+                if x.d >= 0 {
+                    *cast(*mut i64, pd) = norm(x.t, res)
+                }
+            }
+            ir.Op.Ret {
+                if x.a >= 0 {
+                    result = *cast(*i64, pa)
+                }
+                running = false
+            }
+            ir.Op.Sys {
+                *cast(*mut i64, pd) = syscall(v, r, x.b)
+            }
+            ir.Op.Trap {
+                if x.k == 1 {
+                    trap(v, b"division by zero")
+                }
+                trap(v, b"end of a function without `return`")
+            }
+        }
+    }
+    (*v).sp -= f.frame
+    (*v).rsp -= cast(i64, f.nr)
+    (*v).depth -= 1
+    return result
+}
+
+// Runs $init, then main; the exit code.
+pub fn run(v: *mut Vm, a: *mut arena.Arena): !i32 {
+    let g = (*v).g
+    let ok = exec(v, (*g).init, (*v).regs, 0, 0)
+    let m = (*g).fns[(*g).main]
+    if m.np == 0 {
+        return cast(i32, exec(v, (*g).main, (*v).regs, 0, 0))
+    }
+    // main(args: []str): C strings into the cmdline bytes
+    let mut count = 0
+    for i in 0..<(*v).cmdline.len {
+        if (*v).cmdline[i] == 0 {
+            count += 1
+        }
+    }
+    let list = arena.alloc_addr(a, cast(i64, count) * 8 + 8)!
+    let mut k = 0
+    let mut start = 0
+    for i in 0..<(*v).cmdline.len {
+        if (*v).cmdline[i] == 0 {
+            *cast(*mut i64, list + cast(i64, k) * 8) = sys.addr_u8((*v).cmdline) + cast(i64, start)
+            k += 1
+            start = i + 1
+        }
+    }
+    let sl = arena.alloc_addr(a, 16)!
+    *cast(*mut i64, sl) = list
+    *cast(*mut i32, sl + 8) = count
+    // the argument register: r0 of a scratch frame past the used ones
+    let scratch = (*v).regs + (*v).rsp * 8
+    *cast(*mut i64, scratch) = sl
+    (*v).rsp += 1
+    // args[ab] must name register 0: use a pool entry holding 0
+    let ab = ir.add_arg(g, 0)!
+    return cast(i32, exec(v, (*g).main, scratch, ab, 1))
+}

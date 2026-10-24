@@ -4,13 +4,14 @@ Kliner is a native, self-hosted compiler with
 [Klin](https://github.com/klin-lang/klin) syntax. It writes machine code
 and ELF64 binaries itself — no C, no libc, no LLVM in the default path.
 
-> **Status: stage 4 (frontend), checker done.** Runtime in Klin (`rt/`),
+> **Status: stage 5, IR + IR interpreter done.** Runtime in Klin (`rt/`),
 > lexer (`src/lex.kl`), parser (`src/parse.kl`), checker (`src/check/`)
 > — Klin without `$fn`, string interpolation, floats, `pick`,
-> `async` (`str` is supported, C12.3); no IR / backend yet.
+> `async` (`str` is supported, C12.3); linear IR (`src/ir/`) and its
+> interpreter (`src/vm/`); no native backend yet (stage 6).
 
 ```sh
-KLIN=/path/to/klin scripts/test.sh     # build + run tests/rt, tests/lex, tests/parse, tests/check with Klin (Linux x86-64)
+KLIN=/path/to/klin scripts/test.sh     # build + run tests/rt, tests/lex, tests/parse, tests/check, tests/ir with Klin (Linux x86-64)
 KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
                                        # + compare lexer, parser and checker with Klin's own (needs dart)
 ```
@@ -30,10 +31,14 @@ KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
 - `src/check/` — checker: names, module imports, types ([docs](docs/04-checker.md))
 - `tools/kliner-check/` — `kliner-check [--lib] [-I DIR]... FILE`; `tools/klin-check.dart` — the same with Klin's checker
 - `tests/check/` — checker goldens and known differences ([README](tests/check/README.md))
+- `src/ir/` — linear IR and the lowering from the checked AST ([docs](docs/05-ir.md)); `src/vm/` — IR interpreter
+- `tools/kliner-ir/` — `kliner-ir [-I DIR]... FILE` IR dump; `tools/kliner-run/` — `kliner-run [-I DIR]... FILE.kl [ARG]...` (interprets, e.g. `-I rt/linux_x86_64 -I rt -I src`)
+- `tests/ir/` — program goldens (stdout + exit code), compared with the Klin-built binaries
 
 - [Design decisions](docs/00-decisions.md)
 - [Roadmap](docs/01-roadmap.md)
 - [Core subset and runtime](docs/02-core-subset.md) (stage 1, proposal)
 - [AST dump format](docs/03-ast-dump.md)
 - [Checker](docs/04-checker.md)
+- [IR and interpreter](docs/05-ir.md)
 - Klin (compiles to C, bootstraps Kliner): https://github.com/klin-lang/klin

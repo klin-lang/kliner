@@ -1,0 +1,8 @@
+val 25
+err 22
+err 34
+50
+-78
+[ok] [leave] [leave] 14
+run failed 34
+exit 35

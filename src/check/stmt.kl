@@ -113,6 +113,7 @@ fn check_let(c: *mut Ck, n: i32): !i32 {
     if x.b >= 0 && !is_mut && is_u8_slice(c, ty) {
         rob = is_ro_bytes(c, x.b)!
     }
+    set_rt(c, n, ty)
     let mut s = sym(c, name, ty, is_mut, x.tok)
     s.abv = abv
     s.rob = rob
@@ -127,6 +128,7 @@ fn check_let_struct(c: *mut Ck, n: i32): !i32 {
         return error(failt(c, tok_of(c, x.a), b"destructuring requires a struct, got `", st, b"`"))
     }
     let mut ok = materialize(c, x.a, st, true)!
+    set_rt(c, n, st)
     let s = tyof(c, st).a
     let np = cnt(c, x.extra) / 2
     let mut fts = arena_i32(c, np + 1)!
@@ -175,6 +177,7 @@ fn check_let_array(c: *mut Ck, n: i32): !i32 {
         return error(fail(c, x.tok, b"cannot destructure a nested array element (bind the array and index it instead)"))
     }
     let mut ok = materialize(c, x.a, st, true)!
+    set_rt(c, n, st)
     for i in 0..<nn {
         let t = kid(c, x.extra, i)
         if !is_text(c, t, b"_") {
@@ -238,6 +241,7 @@ fn check_struct_assign(c: *mut Ck, n: i32): !i32 {
         return error(failt(c, tok_of(c, x.a), b"destructuring requires a struct, got `", st, b"`"))
     }
     let mut ok = materialize(c, x.a, st, true)!
+    set_rt(c, n, st)
     let s = tyof(c, st).a
     for i in 0..<cnt(c, x.extra) / 2 {
         let fname = txt(c, kid(c, x.extra, i * 2))
@@ -318,6 +322,7 @@ fn check_for_range(c: *mut Ck, n: i32): !i32 {
     }
     let mut ok = materialize(c, x.b, t, true)!
     ok = materialize(c, x.c, t, true)!
+    set_rt(c, n, t)
     ok = push_scope(c)!
     ok = define(c, sym(c, txt(c, x.a), t, true, x.tok)) or {
         pop_scope(c)
@@ -381,7 +386,7 @@ fn check_forc(c: *mut Ck, n: i32): !i32 {
         }
     }
     let mut ok = push_scope(c)!
-    ok = forc_rest(c, x.tok, decl, iname, init, cond, pname, post, x.b, body) or {
+    ok = forc_rest(c, n, x.tok, decl, iname, init, cond, pname, post, x.b, body) or {
         pop_scope(c)
         return error(err)
     }
@@ -389,13 +394,14 @@ fn check_forc(c: *mut Ck, n: i32): !i32 {
     return 0
 }
 
-fn forc_rest(c: *mut Ck, pos: i32, decl: bool, iname: i32, init: i32, cond: i32, pname: i32, post: i32, optok: i32, body: i32): !i32 {
+fn forc_rest(c: *mut Ck, n: i32, pos: i32, decl: bool, iname: i32, init: i32, cond: i32, pname: i32, post: i32, optok: i32, body: i32): !i32 {
     let mut ok = 0
     if iname >= 0 && init >= 0 {
         if decl {
             let t0 = infer(c, init)!
             let t = default_concrete(c, t0, tok_of(c, init))!
             ok = materialize(c, init, t, true)!
+            set_rt(c, n, t)
             ok = reject_mut_ro(c, init, t)!
             ok = define(c, sym(c, txt(c, iname), t, true, pos))!
         } else {

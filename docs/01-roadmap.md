@@ -1,7 +1,7 @@
 # Kliner — roadmap
 
 Stages in order. Decisions behind them: [00-decisions.md](00-decisions.md).
-Status: **stage 4 — checker (`src/check/`) done; parser (`src/parse.kl`, stage 3), lexer (`src/lex.kl`, stage 2) and runtime (`rt/`, stage 1). All built by Klin (main `a66ffbd`).**
+Status: **stage 5 — IR (`src/ir/`) and IR interpreter (`src/vm/`) done; checker (`src/check/`, stage 4), parser (`src/parse.kl`, stage 3), lexer (`src/lex.kl`, stage 2) and runtime (`rt/`, stage 1). All built by Klin (main `a66ffbd`).**
 
 Numbering (**DECIDED 2026-10-24**, [C11.5](02-core-subset.md#c11-stage-3-review--decided-2026-10-24)): the frontend used to be one stage (2: lexer, parser,
 checker). It is now split so that each stage ends in one tested
@@ -54,10 +54,11 @@ Proposal: [02-core-subset.md](02-core-subset.md).
 
 ## 5. IR + IR interpreter
 
-- [ ] Linear three-address IR: virtual registers, basic blocks, explicit width per op, no SSA
-- [ ] Lowering from the checked AST to IR
-- [ ] IR interpreter
-- [ ] Golden tests (expected output per input)
+- [x] Linear three-address IR: virtual registers, basic blocks (implicit, between labels), explicit width per op, no SSA — `src/ir/`, dump `tools/kliner-ir` ([05-ir.md](05-ir.md))
+- [x] Lowering from the checked AST to IR (the whole checker subset; the rest is "not supported yet")
+- [x] IR interpreter — `src/vm/`, `tools/kliner-run`; runs the runtime demos and Kliner's own lexer, parser, checker and IR dump with output identical to the Klin-built tools
+- [x] Golden tests (stdout + exit code, `tests/ir/`), each also checked against the Klin-built binary
+- [ ] Decisions C13 (PROPOSED)
 
 ## 6. x86-64 backend + ELF64 writer
 

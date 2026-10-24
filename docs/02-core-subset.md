@@ -28,6 +28,8 @@ sync with Klin main are in
 [C9](#c9-sync-with-klin-main--proposed) (**PROPOSED**, Marek decides).
 The stage 3 review (C10, the AST model, the roadmap numbering) is
 **DECIDED (2026-10-24)** — see [C11](#c11-stage-3-review--decided-2026-10-24).
+The stage 5 IR choices are in [C13](#c13-stage-5-ir--proposed)
+(**PROPOSED**, Marek decides).
 
 The Klin changes the compiler source relies on are **merged into Klin
 main**: [#351](https://github.com/klin-lang/klin/pull/351) to
@@ -782,3 +784,32 @@ Marek answered "yes" to the three points of the stage 4 report (PR #5):
    `/proc/self/cmdline` (C7.4); the switch happens together with
    `_start` passing `argc` / `argv` (C6), and needs only `os.args` to
    change.
+
+## C13. Stage 5 IR — PROPOSED
+
+Stage 5 ([05-ir.md](05-ir.md)) needed these choices; all are
+PROPOSED, Marek decides:
+
+1. **Flat instruction list with labels** instead of a block table: basic
+   blocks are implicit (from a label to `jmp` / `br` / `ret` / `trap`).
+   K9 holds (three-address, virtual registers, explicit widths, no
+   SSA); the backend (stage 6) can split on labels.
+2. **Every operation wraps at its type** (`u8 + u8` is a `u8`). Klin's C
+   output does not (K-B4); Kliner follows the declared types. Shift
+   counts ≥ the width give 0 / −1 (C: undefined).
+3. **Memory layout = C's natural layout** (as Klin's C), slices
+   `{ptr, len i32}` (16 bytes), `!T` = `{is_err u8 @0, err i32 @4,
+   value @8}`.
+4. **Calling convention in the IR**: aggregates by address; aggregate
+   arguments copied by the caller into a temporary; aggregate results
+   through a hidden first parameter (`sret`); `mut` receivers by
+   address. Every local in a frame slot (the stage-6 codegen plan:
+   "locals in stack slots").
+5. **The checker records name resolution** (`File.rf`: global /
+   constant / function + index) and the type of `let` / `for` /
+   `match` subjects, so the lowering resolves nothing again.
+6. **Interpreter on host memory** with pass-through syscalls; only
+   `/proc/self/cmdline` is emulated (memfd). Traps: exit 134.
+7. **Not supported yet** in the lowering: calls of body-less functions
+   other than `sys.call6`, pointer arithmetic (the checker rejects it
+   today anyway), > 60 call arguments, > 64 multi-assignment targets.

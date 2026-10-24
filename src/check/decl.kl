@@ -42,6 +42,7 @@ pub fn Ck.new(a: *mut arena.Arena, p: *mut load.Prog, require_main: bool): !Ck {
         let f = load.file(p, i)
         (*f).rt = minus1(a, (*f).t.n + 1)!
         (*f).fl = arena.alloc_u8(a, (*f).t.n + 1)!
+        (*f).rf = minus1(a, (*f).t.n + 1)!
     }
     c.ef = -1
     c.etok = -1

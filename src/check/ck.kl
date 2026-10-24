@@ -32,6 +32,14 @@ const F_CSTR: u8 = 4 // Call: cstr_u8 (read-only bytes)
 const F_MODV: u8 = 8 // Get: a module constant, global or function
 const F_MODG: u8 = 16 // Get: a module global read through its qualifier
 
+// load.File.rf: what a node resolved to, index * 8 + kind (stage 5, for
+// the lowering). Name / Get: a global, constant or function; Call: the
+// function called directly, or the global holding the fn value; MCall:
+// the method or associated function. -1: a local or nothing.
+pub const R_GLOBAL: i32 = 1
+pub const R_CONST: i32 = 2
+pub const R_FN: i32 = 3
+
 // An integer constant: sign and a 128-bit magnitude (Klin uses BigInt;
 // every operand of a constant operation fits 64 bits, so 128 bits hold
 // every result). huge: a literal wider than 128 bits.
@@ -360,6 +368,11 @@ fn get_rt(c: *mut Ck, n: i32): i32 {
 fn set_rt(c: *mut Ck, n: i32, ty: i32) {
     let f = load.file((*c).p, (*c).cf)
     (*f).rt[n] = ty
+}
+
+fn set_rf(c: *mut Ck, n: i32, idx: i32, k: i32) {
+    let f = load.file((*c).p, (*c).cf)
+    (*f).rf[n] = idx * 8 + k
 }
 
 fn has_fl(c: *mut Ck, n: i32, bit: u8): bool {
@@ -849,4 +862,14 @@ fn lit_value(c: *mut Ck, tok: i32): LitV {
         return none
     }
     return LitV{ok: true, v: v}
+}
+
+// The value of integer constant k as 64 bits (two's complement), for the
+// lowering (stage 5).
+pub fn const_int(c: *mut Ck, k: i32): i64 {
+    let v = (*c).const_v[k]
+    if v.neg {
+        return cast(i64, cast(u64, 0) - v.lo)
+    }
+    return cast(i64, v.lo)
 }

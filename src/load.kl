@@ -33,6 +33,8 @@ pub struct File {
     mid: i32 // module id (index into Prog.mods)
     rt: []i32 // checker: type id per node (resolvedType), -1 none
     fl: []u8 // checker: flags per node (check.F_*)
+    rf: []i32 // checker: what a Name / Get / Call / MCall resolved to
+              // (check.R_*: index * 8 + kind), -1 local or none
 }
 
 // A top-level declaration: its file, the Decl node and the inner node

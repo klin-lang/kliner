@@ -594,6 +594,7 @@ fn module_global(c: *mut Ck, g: i32): !i32 {
         return error(e)
     }
     set_fl(c, g, F_MODG)
+    set_rf(c, g, gi, R_GLOBAL)
     return gi
 }
 
@@ -764,6 +765,7 @@ fn try_module_value(c: *mut Ck, g: i32): !i32 {
             return error(priv2(c, x.tok, b"constant `", q, name))
         }
         set_fl(c, g, F_MODV)
+        set_rf(c, g, k, R_CONST)
         return (*c).const_ty[k]
     }
     let gi = tab.get(&(*c).globals, name, m)
@@ -772,6 +774,7 @@ fn try_module_value(c: *mut Ck, g: i32): !i32 {
             return error(priv2(c, x.tok, b"global `", q, name))
         }
         set_fl(c, g, F_MODG)
+        set_rf(c, g, gi, R_GLOBAL)
         return (*c).glob_ty[gi]
     }
     let fi = tab.get(&(*c).funcs, name, m)
@@ -780,6 +783,7 @@ fn try_module_value(c: *mut Ck, g: i32): !i32 {
             return error(priv2(c, x.tok, b"function `", q, name))
         }
         set_fl(c, g, F_MODV)
+        set_rf(c, g, fi, R_FN)
         return fn_sig_type(c, fi)
     }
     let e = fail3(c, x.tok, b"unknown name `", q, b".")
@@ -914,14 +918,17 @@ fn infer_name(c: *mut Ck, e: i32): !i32 {
     }
     let g = current_global(c, name)
     if g >= 0 {
+        set_rf(c, e, g, R_GLOBAL)
         return (*c).glob_ty[g]
     }
     let k = tab.get(&(*c).consts, name, (*c).cm)
     if k >= 0 {
+        set_rf(c, e, k, R_CONST)
         return (*c).const_ty[k]
     }
     let fi = fn_for_name(c, name)
     if fi >= 0 {
+        set_rf(c, e, fi, R_FN)
         return fn_sig_type(c, fi)
     }
     return error(fail3(c, x.tok, b"unknown variable `", name, b"`"))
@@ -1469,6 +1476,7 @@ fn check_target(c: *mut Ck, t: i32, pos: i32): !i32 {
                 if !glob_mut(c, g) {
                     return error(assign_immut(c, pos, name))
                 }
+                set_rf(c, p, g, R_GLOBAL)
                 return (*c).glob_ty[g]
             }
             if tab.get(&(*c).consts, name, (*c).cm) >= 0 {
@@ -1622,6 +1630,7 @@ fn check_call(c: *mut Ck, e: i32): !i32 {
                 madd(c, b"` variable)")
                 return error(e3)
             }
+            set_rf(c, e, g, R_GLOBAL)
             return fn_type_call(c, gt, callee, x.extra, pos)
         }
         if x.a >= 0 {
@@ -1686,6 +1695,7 @@ fn check_call(c: *mut Ck, e: i32): !i32 {
         madd(c, b"` is private")
         return error(e7)
     }
+    set_rf(c, e, fi, R_FN)
     let np = fn_np(c, fi)
     let n = cnt(c, x.extra)
     if n != np {
@@ -1728,6 +1738,7 @@ fn try_assoc(c: *mut Ck, e: i32): !i32 {
         madd(c, b"` is private")
         return error(e2)
     }
+    set_rf(c, e, fi, R_FN)
     let np = fn_np(c, fi)
     let n = cnt(c, x.extra)
     if n != np {
@@ -1798,6 +1809,7 @@ fn check_mcall(c: *mut Ck, e: i32): !i32 {
     if fn_mut_recv(c, mi) {
         let mut ok = require_mut_place(c, x.a, tok_of(c, x.a), b"cannot call a mutating method on an immutable variable", b"mutating method requires a mutable variable")!
     }
+    set_rf(c, e, mi, R_FN)
     let np = fn_np(c, mi)
     let n = cnt(c, x.extra)
     if n != np {
@@ -1826,6 +1838,7 @@ fn check_match_subject(c: *mut Ck, s: i32): !i32 {
         return error(failt(c, tok_of(c, s), b"`match` requires an integer or enum subject, got `", t, b"`"))
     }
     let mut ok = materialize(c, s, t, true)!
+    set_rt(c, s, t)
     return t
 }
 

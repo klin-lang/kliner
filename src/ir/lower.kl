@@ -1,0 +1,1387 @@
+// lower.kl — lowering a checked program to the IR: the state, node and
+// type helpers, the memory layout, functions and statements. The
+// expressions are in lexpr.kl. The checker is the source of truth for
+// names and types: load.File.rt (type per node), fl (flags) and rf
+// (what a name resolved to); the lowering keeps only the local scope.
+module ir
+import arena
+import ast
+import check
+import lex
+import load
+import tab
+import types
+
+// Copies of the checker's node flags (check.F_*).
+const F_ENUMC: u8 = 1
+const F_CSTR: u8 = 4
+const F_MODV: u8 = 8
+const F_MODG: u8 = 16
+
+const MAXLOC: i32 = 4096
+const MAXDEF: i32 = 256
+const MAXLOOP: i32 = 256
+const MAXLAB: i32 = 65536
+
+pub struct Lw {
+    a: *mut arena.Arena
+    c: *mut check.Ck
+    p: *mut load.Prog
+    g: *mut Prog
+    cf: i32 // current file
+    cm: i32 // current module
+    // layout caches, per type id (-1 not computed) and per struct
+    tsz: []i64
+    tal: []i64
+    sfo: []i32 // struct -> first entry in foff, -1 not computed
+    ssz: []i64 // struct size and alignment (once sfo >= 0)
+    sal: []i64
+    foff: []i64
+    nfo: i32
+    // the function being lowered
+    fi: i32
+    nr: i32
+    nl: i32
+    labat: []i32 // label -> absolute instruction index
+    frame: i64
+    ret: i32 // checker type of the result
+    sret_off: i64 // slot holding the sret pointer
+    is_main: bool
+    // locals: name, checker type, slot offset, ref (the slot holds a pointer)
+    lname: [][]u8
+    lty: []i32
+    loff: []i64
+    lref: []u8
+    nloc: i32
+    hlo: i32 // locals [hlo, hhi) are hidden (while emitting a defer)
+    hhi: i32
+    // scopes: nloc and ndef at entry
+    sloc: []i32
+    sdef: []i32
+    nsc: i32
+    // deferred statements and the number of visible locals at the defer
+    dnode: []i32
+    dloc: []i32
+    ndef: i32
+    // loops: break / continue labels, ndef at entry
+    lbrk: []i32
+    lcont: []i32
+    ldef: []i32
+    nlp: i32
+}
+
+fn alloc_i64n(a: *mut arena.Arena, n: i32, v: i64): ![]i64 {
+    let mut s = arena.alloc_i64(a, n)!
+    for i in 0..<n {
+        s[i] = v
+    }
+    return s
+}
+
+fn alloc_i32n(a: *mut arena.Arena, n: i32, v: i32): ![]i32 {
+    let mut s = arena.alloc_i32(a, n)!
+    for i in 0..<n {
+        s[i] = v
+    }
+    return s
+}
+
+fn Lw.new(a: *mut arena.Arena, c: *mut check.Ck, p: *mut load.Prog, g: *mut Prog): !Lw {
+    let mut l: Lw
+    l.a = a
+    l.c = c
+    l.p = p
+    l.g = g
+    l.tsz = alloc_i64n(a, (*c).t.n + 64, -1)!
+    l.tal = alloc_i64n(a, (*c).t.n + 64, -1)!
+    l.sfo = alloc_i32n(a, (*p).structs.n + 1, -1)!
+    l.ssz = arena.alloc_i64(a, (*p).structs.n + 1)!
+    l.sal = arena.alloc_i64(a, (*p).structs.n + 1)!
+    let mut nf = 0
+    for i in 0..<(*p).structs.n {
+        let r = (*p).structs.r[i]
+        let f = load.file(p, r.file)
+        nf += ast.count(&(*f).t, (*f).t.nodes[r.node].extra)
+    }
+    l.foff = arena.alloc_i64(a, nf + 1)!
+    l.labat = arena.alloc_i32(a, MAXLAB)!
+    l.lname = arena.alloc_slices_u8(a, MAXLOC)!
+    l.lty = arena.alloc_i32(a, MAXLOC)!
+    l.loff = arena.alloc_i64(a, MAXLOC)!
+    l.lref = arena.alloc_u8(a, MAXLOC)!
+    l.sloc = arena.alloc_i32(a, MAXLOC)!
+    l.sdef = arena.alloc_i32(a, MAXLOC)!
+    l.dnode = arena.alloc_i32(a, MAXDEF)!
+    l.dloc = arena.alloc_i32(a, MAXDEF)!
+    l.lbrk = arena.alloc_i32(a, MAXLOOP)!
+    l.lcont = arena.alloc_i32(a, MAXLOOP)!
+    l.ldef = arena.alloc_i32(a, MAXLOOP)!
+    return l
+}
+
+// ---- errors ----
+
+fn fail(l: *mut Lw, tok: i32, msg: []u8): i32 {
+    let g = (*l).g
+    (*g).ef = (*l).cf
+    (*g).etok = tok
+    (*g).mn = 0
+    madd(g, msg)
+    return E_IR
+}
+
+// "<what> is not supported yet"
+fn unsup(l: *mut Lw, tok: i32, what: []u8): i32 {
+    let r = fail(l, tok, what)
+    madd((*l).g, b" is not supported yet")
+    return r
+}
+
+// ---- nodes ----
+
+fn file(l: *mut Lw): *mut load.File {
+    return load.file((*l).p, (*l).cf)
+}
+
+fn nd(l: *mut Lw, n: i32): ast.Node {
+    return (*file(l)).t.nodes[n]
+}
+
+fn nk(l: *mut Lw, n: i32): ast.Nk {
+    return (*file(l)).t.nodes[n].kind
+}
+
+fn cnt(l: *mut Lw, list: i32): i32 {
+    if list < 0 {
+        return 0
+    }
+    return ast.count(&(*file(l)).t, list)
+}
+
+fn kid(l: *mut Lw, list: i32, i: i32): i32 {
+    return ast.item(&(*file(l)).t, list, i)
+}
+
+fn txt(l: *mut Lw, tok: i32): []u8 {
+    return load.text((*l).p, (*l).cf, tok)
+}
+
+fn is_txt(l: *mut Lw, tok: i32, s: []u8): bool {
+    return tab.eq(txt(l, tok), s)
+}
+
+fn rt(l: *mut Lw, n: i32): i32 {
+    return (*file(l)).rt[n]
+}
+
+fn flags(l: *mut Lw, n: i32): u8 {
+    return (*file(l)).fl[n]
+}
+
+fn rf(l: *mut Lw, n: i32): i32 {
+    return (*file(l)).rf[n]
+}
+
+fn peel(l: *mut Lw, n: i32): i32 {
+    let mut e = n
+    while nk(l, e) == ast.Nk.Group {
+        e = nd(l, e).a
+    }
+    return e
+}
+
+// Switches to file f (and its module); returns the old file.
+fn enter(l: *mut Lw, f: i32): i32 {
+    let old = (*l).cf
+    (*l).cf = f
+    (*l).cm = (*load.file((*l).p, f)).mid
+    return old
+}
+
+// ---- types ----
+
+fn ty(l: *mut Lw, t: i32): types.Ty {
+    return (*(*l).c).t.k[t]
+}
+
+fn tk(l: *mut Lw, t: i32): types.Tk {
+    return (*(*l).c).t.k[t].kind
+}
+
+// A concrete type (not open, not none).
+fn known(l: *mut Lw, t: i32): bool {
+    if t < 0 {
+        return false
+    }
+    let k = tk(l, t)
+    return k != types.Tk.UInt && k != types.Tk.UEmpty && k != types.Tk.BareErr
+}
+
+fn is_agg(l: *mut Lw, t: i32): bool {
+    let k = tk(l, t)
+    return k == types.Tk.Struct || k == types.Tk.Array || k == types.Tk.Slice || k == types.Tk.Result
+}
+
+// The IR type of a scalar checker type; untyped / none: i64.
+fn irt(l: *mut Lw, t: i32): u8 {
+    if !known(l, t) {
+        return I64
+    }
+    let x = ty(l, t)
+    if x.kind == types.Tk.Prim {
+        let p = t
+        if p <= 7 {
+            return cast(u8, p)
+        }
+        if p == 10 {
+            return U8
+        }
+        if p == 11 {
+            return U64
+        }
+        return I64 // isize; f32 / f64 are rejected before
+    }
+    if x.kind == types.Tk.Enum {
+        return irt(l, (*(*l).c).enum_base[x.a])
+    }
+    return PTR
+}
+
+fn is_float(l: *mut Lw, t: i32): bool {
+    return t == 8 || t == 9
+}
+
+fn roundup(v: i64, a: i64): i64 {
+    return (v + a - 1) / a * a
+}
+
+fn size(l: *mut Lw, t: i32): !i64 {
+    let ok = layout(l, t)!
+    return (*l).tsz[t]
+}
+
+fn align(l: *mut Lw, t: i32): !i64 {
+    let ok = layout(l, t)!
+    return (*l).tal[t]
+}
+
+// Byte offset of field j of struct s.
+fn foffset(l: *mut Lw, s: i32, j: i32): !i64 {
+    let ok = struct_layout(l, s)!
+    return (*l).foff[(*l).sfo[s] + j]
+}
+
+fn set_layout(l: *mut Lw, t: i32, s: i64, a: i64): !i32 {
+    (*l).tsz[t] = s
+    (*l).tal[t] = a
+    return 0
+}
+
+// C-like natural alignment: a slice is {ptr, i32 len} (16 bytes), !T is
+// {u8 is_err, i32 err, T at ROK}.
+fn layout(l: *mut Lw, t: i32): !i32 {
+    if (*l).tsz[t] >= 0 {
+        return 0
+    }
+    let x = ty(l, t)
+    let k = x.kind
+    if k == types.Tk.Prim {
+        let w = prim_size(t)
+        return set_layout(l, t, w, w)
+    }
+    if k == types.Tk.Enum {
+        let w = prim_size((*(*l).c).enum_base[x.a])
+        return set_layout(l, t, w, w)
+    }
+    if k == types.Tk.Void {
+        return set_layout(l, t, 0, 1)
+    }
+    if k == types.Tk.Array {
+        let es = size(l, x.a)!
+        let ea = align(l, x.a)!
+        return set_layout(l, t, es * x.n, ea)
+    }
+    if k == types.Tk.Slice {
+        return set_layout(l, t, 16, 8)
+    }
+    if k == types.Tk.Result {
+        let es = size(l, x.a)!
+        let mut ea = align(l, x.a)!
+        if ea < 4 {
+            ea = 4
+        }
+        return set_layout(l, t, roundup(ROK + es, ea), ea)
+    }
+    if k == types.Tk.Struct {
+        let ok = struct_layout(l, x.a)!
+        return set_layout(l, t, (*l).ssz[x.a], (*l).sal[x.a])!
+    }
+    // Ptr, Fn, Str and the rest: a pointer
+    return set_layout(l, t, 8, 8)
+}
+
+fn prim_size(p: i32): i64 {
+    if p == 0 || p == 4 || p == 10 {
+        return 1
+    }
+    if p == 1 || p == 5 {
+        return 2
+    }
+    if p == 2 || p == 6 || p == 8 {
+        return 4
+    }
+    return 8
+}
+
+fn struct_layout(l: *mut Lw, s: i32): !i32 {
+    if (*l).sfo[s] >= 0 {
+        return 0
+    }
+    let r = (*(*l).p).structs.r[s]
+    let f = load.file((*l).p, r.file)
+    let list = (*f).t.nodes[r.node].extra
+    let n = ast.count(&(*f).t, list)
+    let base = (*l).nfo
+    (*l).nfo += n
+    let mut off: i64 = 0
+    let mut al: i64 = 1
+    for j in 0..<n {
+        let fnode = ast.item(&(*f).t, list, j)
+        let ft = (*f).rt[fnode]
+        let fs = size(l, ft)!
+        let fa = align(l, ft)!
+        off = roundup(off, fa)
+        (*l).foff[base + j] = off
+        off += fs
+        if fa > al {
+            al = fa
+        }
+    }
+    (*l).sfo[s] = base
+    (*l).ssz[s] = roundup(off, al)
+    (*l).sal[s] = al
+    return 0
+}
+
+// Field `name` of struct s: index, -1 if none.
+fn sfield(l: *mut Lw, s: i32, name: []u8): i32 {
+    let r = (*(*l).p).structs.r[s]
+    let f = load.file((*l).p, r.file)
+    let list = (*f).t.nodes[r.node].extra
+    let n = ast.count(&(*f).t, list)
+    for j in 0..<n {
+        let fnode = ast.item(&(*f).t, list, j)
+        if tab.eq(load.text((*l).p, r.file, (*f).t.nodes[fnode].tok), name) {
+            return j
+        }
+    }
+    return -1
+}
+
+fn sfield_ty(l: *mut Lw, s: i32, j: i32): i32 {
+    let r = (*(*l).p).structs.r[s]
+    let f = load.file((*l).p, r.file)
+    let fnode = ast.item(&(*f).t, (*f).t.nodes[r.node].extra, j)
+    return (*f).rt[fnode]
+}
+
+fn sfield_n(l: *mut Lw, s: i32): i32 {
+    let r = (*(*l).p).structs.r[s]
+    let f = load.file((*l).p, r.file)
+    return ast.count(&(*f).t, (*f).t.nodes[r.node].extra)
+}
+
+// ---- literals ----
+
+fn digit(ch: u8, radix: i64): i64 {
+    let mut d: i64 = 99
+    if ch >= 48 && ch <= 57 {
+        d = cast(i64, ch) - 48
+    } else if ch >= 97 && ch <= 102 {
+        d = cast(i64, ch) - 87
+    } else if ch >= 65 && ch <= 70 {
+        d = cast(i64, ch) - 55
+    }
+    if d >= radix {
+        return -1
+    }
+    return d
+}
+
+// The value of an Int literal token of file f (wraps at 64 bits; the
+// checker rejected literals that do not fit their type).
+fn lit_int(l: *mut Lw, f: i32, tok: i32): i64 {
+    let s = load.text((*l).p, f, tok)
+    if s.len > 0 && s[0] == 39 {
+        let inner = s[1:s.len - 1]
+        if inner.len == 2 && inner[0] == 92 {
+            let e = inner[1]
+            if e == 110 {
+                return 10
+            }
+            if e == 116 {
+                return 9
+            }
+            if e == 48 {
+                return 0
+            }
+            return cast(i64, e)
+        }
+        return cast(i64, inner[0])
+    }
+    let mut radix: i64 = 10
+    let mut i = 0
+    if s.len >= 2 && s[0] == 48 {
+        let x = s[1]
+        if x == 120 || x == 88 {
+            radix = 16
+        } else if x == 98 || x == 66 {
+            radix = 2
+        } else if x == 111 || x == 79 {
+            radix = 8
+        }
+        if radix != 10 {
+            i = 2
+        }
+    }
+    let mut v: u64 = 0
+    while i < s.len {
+        if s[i] != 95 {
+            v = v * cast(u64, radix) + cast(u64, digit(s[i], radix))
+        }
+        i += 1
+    }
+    return cast(i64, v)
+}
+
+// The value of variant `name` of enum e (explicit literal or previous + 1).
+fn enum_value(l: *mut Lw, e: i32, name: []u8): i64 {
+    let r = (*(*l).p).enums.r[e]
+    let f = load.file((*l).p, r.file)
+    let list = (*f).t.nodes[r.node].extra
+    let n = ast.count(&(*f).t, list)
+    let mut v: i64 = -1
+    for j in 0..<n {
+        let vn = (*f).t.nodes[ast.item(&(*f).t, list, j)]
+        if vn.a >= 0 {
+            let lit = (*f).t.nodes[vn.a]
+            if lit.kind == ast.Nk.Int {
+                v = lit_int(l, r.file, lit.tok)
+            } else {
+                v += 1
+            }
+        } else {
+            v += 1
+        }
+        if tab.eq(load.text((*l).p, r.file, vn.tok), name) {
+            return v
+        }
+    }
+    return 0
+}
+
+// ---- emitting ----
+
+fn ins(l: *mut Lw, op: Op, t: u8, d: i32, a: i32, b: i32, c: i32, k: i64): !i32 {
+    return emit((*l).g, Ins{op: op, t: t, d: d, a: a, b: b, c: c, k: k})!
+}
+
+fn newr(l: *mut Lw): i32 {
+    (*l).nr += 1
+    return (*l).nr - 1
+}
+
+fn kconst(l: *mut Lw, t: u8, v: i64): !i32 {
+    let r = newr(l)
+    let ok = ins(l, Op.Const, t, r, -1, -1, -1, v)!
+    return r
+}
+
+fn op1(l: *mut Lw, op: Op, t: u8, a: i32): !i32 {
+    let r = newr(l)
+    let ok = ins(l, op, t, r, a, -1, -1, 0)!
+    return r
+}
+
+fn op2(l: *mut Lw, op: Op, t: u8, a: i32, b: i32): !i32 {
+    let r = newr(l)
+    let ok = ins(l, op, t, r, a, b, -1, 0)!
+    return r
+}
+
+fn mov(l: *mut Lw, d: i32, a: i32): !i32 {
+    return ins(l, Op.Mov, I64, d, a, -1, -1, 0)!
+}
+
+fn conv(l: *mut Lw, to: u8, from: u8, a: i32): !i32 {
+    if to == from {
+        return a
+    }
+    let r = newr(l)
+    let ok = ins(l, Op.Conv, to, r, a, -1, cast(i32, from), 0)!
+    return r
+}
+
+fn load(l: *mut Lw, t: u8, a: i32, k: i64): !i32 {
+    let r = newr(l)
+    let ok = ins(l, Op.Load, t, r, a, -1, -1, k)!
+    return r
+}
+
+fn store(l: *mut Lw, t: u8, a: i32, k: i64, v: i32): !i32 {
+    return ins(l, Op.Store, t, -1, a, v, -1, k)!
+}
+
+fn copy(l: *mut Lw, dst: i32, src: i32, n: i64): !i32 {
+    if n == 0 {
+        return 0
+    }
+    return ins(l, Op.Copy, I64, -1, dst, src, -1, n)!
+}
+
+fn zero(l: *mut Lw, dst: i32, n: i64): !i32 {
+    if n == 0 {
+        return 0
+    }
+    return ins(l, Op.Zero, I64, -1, dst, -1, -1, n)!
+}
+
+// addr + k
+fn addk(l: *mut Lw, a: i32, k: i64): !i32 {
+    if k == 0 {
+        return a
+    }
+    let kr = kconst(l, I64, k)!
+    return op2(l, Op.Add, PTR, a, kr)!
+}
+
+fn alloc_slot(l: *mut Lw, n: i64, al: i64): i64 {
+    let mut a = al
+    if a < 1 {
+        a = 1
+    }
+    (*l).frame = roundup((*l).frame, a)
+    let off = (*l).frame
+    (*l).frame += n
+    if n == 0 {
+        (*l).frame += 1
+    }
+    return off
+}
+
+fn slot_addr(l: *mut Lw, off: i64): !i32 {
+    let r = newr(l)
+    let ok = ins(l, Op.Slot, PTR, r, -1, -1, -1, off)!
+    return r
+}
+
+// A fresh zeroed-on-need temporary of type t; its address.
+fn temp(l: *mut Lw, t: i32): !i32 {
+    let s = size(l, t)!
+    let a = align(l, t)!
+    return slot_addr(l, alloc_slot(l, s, a))!
+}
+
+fn newlab(l: *mut Lw, tok: i32): !i32 {
+    if (*l).nl == MAXLAB {
+        return error(fail(l, tok, b"too many labels in one function"))
+    }
+    (*l).nl += 1
+    return (*l).nl - 1
+}
+
+fn place(l: *mut Lw, lb: i32): !i32 {
+    let i = ins(l, Op.Label, I64, -1, lb, -1, -1, 0)!
+    (*l).labat[lb] = i
+    return 0
+}
+
+fn jmp(l: *mut Lw, lb: i32): !i32 {
+    return ins(l, Op.Jmp, I64, -1, lb, -1, -1, 0)!
+}
+
+fn br(l: *mut Lw, c: i32, yes: i32, no: i32): !i32 {
+    return ins(l, Op.Br, I64, -1, c, yes, no, 0)!
+}
+
+// ---- locals and scopes ----
+
+fn push_scope(l: *mut Lw, tok: i32): !i32 {
+    if (*l).nsc == MAXLOC {
+        return error(fail(l, tok, b"blocks nested too deep"))
+    }
+    (*l).sloc[(*l).nsc] = (*l).nloc
+    (*l).sdef[(*l).nsc] = (*l).ndef
+    (*l).nsc += 1
+    return 0
+}
+
+// Ends a scope: its defers in reverse order, then its locals.
+fn pop_scope(l: *mut Lw, emit_defers: bool): !i32 {
+    (*l).nsc -= 1
+    if emit_defers {
+        let ok = run_defers(l, (*l).sdef[(*l).nsc])!
+    }
+    (*l).ndef = (*l).sdef[(*l).nsc]
+    (*l).nloc = (*l).sloc[(*l).nsc]
+    return 0
+}
+
+// A local in a new slot; its index.
+fn def_local(l: *mut Lw, name: []u8, t: i32, is_ref: bool, tok: i32): !i32 {
+    if (*l).nloc == MAXLOC {
+        return error(fail(l, tok, b"too many locals in one function"))
+    }
+    if is_float(l, t) {
+        return error(unsup(l, tok, b"a floating-point local"))
+    }
+    let i = (*l).nloc
+    (*l).lname[i] = name
+    (*l).lty[i] = t
+    if is_ref {
+        (*l).loff[i] = alloc_slot(l, 8, 8)
+        (*l).lref[i] = 1
+    } else {
+        let s = size(l, t)!
+        let a = align(l, t)!
+        (*l).loff[i] = alloc_slot(l, s, a)
+        (*l).lref[i] = 0
+    }
+    (*l).nloc += 1
+    return i
+}
+
+fn find_local(l: *mut Lw, name: []u8): i32 {
+    let mut i = (*l).nloc - 1
+    while i >= 0 {
+        if (i < (*l).hlo || i >= (*l).hhi) && tab.eq((*l).lname[i], name) {
+            return i
+        }
+        i -= 1
+    }
+    return -1
+}
+
+// Address of local i.
+fn local_addr(l: *mut Lw, i: i32): !i32 {
+    let s = slot_addr(l, (*l).loff[i])!
+    if (*l).lref[i] == 1 {
+        return load(l, PTR, s, 0)!
+    }
+    return s
+}
+
+// A new local initialized from expression e (type t).
+fn bind(l: *mut Lw, name: []u8, t: i32, e: i32, tok: i32): !i32 {
+    // evaluate first: `let x = x + 1` reads the outer x
+    if e < 0 {
+        let i = def_local(l, name, t, false, tok)!
+        let a = local_addr(l, i)!
+        let sz = size(l, t)!
+        let ok = zero(l, a, sz)!
+        return i
+    }
+    if is_agg(l, t) {
+        let tmp = temp(l, t)!
+        let mut ok = store_as(l, e, tmp, t)!
+        let i = def_local(l, name, t, false, tok)!
+        let a = local_addr(l, i)!
+        let sz = size(l, t)!
+        ok = copy(l, a, tmp, sz)!
+        return i
+    }
+    let v = rv(l, e)!
+    let i = def_local(l, name, t, false, tok)!
+    let a = local_addr(l, i)!
+    let ok = store(l, irt(l, t), a, 0, v)!
+    return i
+}
+
+// ---- defers ----
+
+fn run_defers(l: *mut Lw, from: i32): !i32 {
+    let mut i = (*l).ndef - 1
+    let save_n = (*l).ndef
+    let hlo = (*l).hlo
+    let hhi = (*l).hhi
+    while i >= from {
+        // the deferred statement sees the locals of its defer point
+        (*l).hlo = (*l).dloc[i]
+        (*l).hhi = (*l).nloc
+        (*l).ndef = i
+        let ok = stmt(l, (*l).dnode[i])!
+        i -= 1
+    }
+    (*l).ndef = save_n
+    (*l).hlo = hlo
+    (*l).hhi = hhi
+    return 0
+}
+
+// ---- statements ----
+
+fn block(l: *mut Lw, b: i32): !i32 {
+    let x = nd(l, b)
+    let mut ok = push_scope(l, x.tok)!
+    let n = cnt(l, x.extra)
+    for i in 0..<n {
+        ok = stmt(l, kid(l, x.extra, i))!
+    }
+    ok = pop_scope(l, true)!
+    return 0
+}
+
+fn stmt(l: *mut Lw, s: i32): !i32 {
+    let x = nd(l, s)
+    let k = x.kind
+    let mut ok = 0
+    if k == ast.Nk.Block {
+        return block(l, s)!
+    }
+    if k == ast.Nk.Let {
+        let t = rt(l, s)
+        let i = bind(l, txt(l, x.tok), t, x.b, x.tok)!
+        return 0
+    }
+    if k == ast.Nk.ExprStmt {
+        let r = rv(l, x.a)!
+        return 0
+    }
+    if k == ast.Nk.Assign {
+        return assign(l, s)!
+    }
+    if k == ast.Nk.If {
+        let c = rv(l, x.a)!
+        let yes = newlab(l, x.tok)!
+        let no = newlab(l, x.tok)!
+        let end = newlab(l, x.tok)!
+        ok = br(l, c, yes, no)!
+        ok = place(l, yes)!
+        ok = block(l, x.b)!
+        ok = jmp(l, end)!
+        ok = place(l, no)!
+        if x.c >= 0 {
+            ok = stmt(l, x.c)!
+        }
+        ok = place(l, end)!
+        return 0
+    }
+    if k == ast.Nk.While {
+        let top = newlab(l, x.tok)!
+        let body = newlab(l, x.tok)!
+        let end = newlab(l, x.tok)!
+        ok = place(l, top)!
+        let c = rv(l, x.a)!
+        ok = br(l, c, body, end)!
+        ok = place(l, body)!
+        ok = push_loop(l, end, top, x.tok)!
+        ok = block(l, x.b)!
+        (*l).nlp -= 1
+        ok = jmp(l, top)!
+        ok = place(l, end)!
+        return 0
+    }
+    if k == ast.Nk.ForRange {
+        return for_range(l, s)!
+    }
+    if k == ast.Nk.ForC {
+        return for_c(l, s)!
+    }
+    if k == ast.Nk.Return {
+        return ret(l, s)!
+    }
+    if k == ast.Nk.Break || k == ast.Nk.Continue {
+        let j = (*l).nlp - 1
+        ok = run_defers(l, (*l).ldef[j])!
+        if k == ast.Nk.Break {
+            ok = jmp(l, (*l).lbrk[j])!
+        } else {
+            ok = jmp(l, (*l).lcont[j])!
+        }
+        return 0
+    }
+    if k == ast.Nk.Defer {
+        if (*l).ndef == MAXDEF {
+            return error(fail(l, x.tok, b"too many defers in one function"))
+        }
+        (*l).dnode[(*l).ndef] = x.a
+        (*l).dloc[(*l).ndef] = (*l).nloc
+        (*l).ndef += 1
+        return 0
+    }
+    if k == ast.Nk.Match {
+        let r = match_any(l, s, -1, -1)!
+        return 0
+    }
+    if k == ast.Nk.LetStruct {
+        return let_struct(l, s)!
+    }
+    if k == ast.Nk.LetArray {
+        return let_array(l, s)!
+    }
+    if k == ast.Nk.MultiAssign {
+        return multi_assign(l, s)!
+    }
+    if k == ast.Nk.StructAssign {
+        return struct_assign(l, s)!
+    }
+    if k == ast.Nk.Asm {
+        return error(unsup(l, x.tok, b"`asm`"))
+    }
+    return error(unsup(l, x.tok, b"this statement"))
+}
+
+fn push_loop(l: *mut Lw, brk: i32, cont: i32, tok: i32): !i32 {
+    if (*l).nlp == MAXLOOP {
+        return error(fail(l, tok, b"loops nested too deep"))
+    }
+    (*l).lbrk[(*l).nlp] = brk
+    (*l).lcont[(*l).nlp] = cont
+    (*l).ldef[(*l).nlp] = (*l).ndef
+    (*l).nlp += 1
+    return 0
+}
+
+// for i in a..<b { body }: C's for (T i = a; i < b; i++) — b is
+// evaluated before every iteration and the body may change i.
+fn for_range(l: *mut Lw, s: i32): !i32 {
+    let x = nd(l, s)
+    let t = rt(l, s)
+    let it = irt(l, t)
+    let mut ok = push_scope(l, x.tok)!
+    let start = rv(l, x.b)!
+    let i = def_local(l, txt(l, x.a), t, false, x.a)!
+    let a0 = local_addr(l, i)!
+    ok = store(l, it, a0, 0, start)!
+    let top = newlab(l, x.tok)!
+    let body = newlab(l, x.tok)!
+    let post = newlab(l, x.tok)!
+    let end = newlab(l, x.tok)!
+    ok = place(l, top)!
+    let a1 = local_addr(l, i)!
+    let cur = load(l, it, a1, 0)!
+    let lim = rv(l, x.c)!
+    let c = op2(l, Op.Lt, it, cur, lim)!
+    ok = br(l, c, body, end)!
+    ok = place(l, body)!
+    ok = push_loop(l, end, post, x.tok)!
+    ok = block(l, x.extra)!
+    (*l).nlp -= 1
+    ok = place(l, post)!
+    let a2 = local_addr(l, i)!
+    let v = load(l, it, a2, 0)!
+    let one = kconst(l, it, 1)!
+    let v2 = op2(l, Op.Add, it, v, one)!
+    ok = store(l, it, a2, 0, v2)!
+    ok = jmp(l, top)!
+    ok = place(l, end)!
+    ok = pop_scope(l, false)!
+    return 0
+}
+
+// The address and type of a name target (ForC): a local or a global.
+fn name_target(l: *mut Lw, tok: i32, tyout: *mut i32): !i32 {
+    let name = txt(l, tok)
+    let i = find_local(l, name)
+    if i >= 0 {
+        *tyout = (*l).lty[i]
+        return local_addr(l, i)!
+    }
+    let gi = tab.get(&(*(*l).c).globals, name, (*l).cm)
+    if gi < 0 {
+        return error(fail(l, tok, b"unknown name"))
+    }
+    *tyout = (*(*l).c).glob_ty[gi]
+    return glob_addr(l, gi)!
+}
+
+fn for_c(l: *mut Lw, s: i32): !i32 {
+    let x = nd(l, s)
+    let init_name = kid(l, x.extra, 0)
+    let init = kid(l, x.extra, 1)
+    let cond = kid(l, x.extra, 2)
+    let post_name = kid(l, x.extra, 3)
+    let post = kid(l, x.extra, 4)
+    let body = kid(l, x.extra, 5)
+    let mut ok = push_scope(l, x.tok)!
+    if init_name >= 0 {
+        if (x.a & 1) != 0 {
+            let i = bind(l, txt(l, init_name), rt(l, s), init, init_name)!
+        } else {
+            let mut t: i32 = -1
+            let v = rv(l, init)!
+            let a = name_target(l, init_name, &t)!
+            ok = store(l, irt(l, t), a, 0, v)!
+        }
+    }
+    let top = newlab(l, x.tok)!
+    let bl = newlab(l, x.tok)!
+    let pl = newlab(l, x.tok)!
+    let end = newlab(l, x.tok)!
+    ok = place(l, top)!
+    if cond >= 0 {
+        let c = rv(l, cond)!
+        ok = br(l, c, bl, end)!
+    }
+    ok = place(l, bl)!
+    ok = push_loop(l, end, pl, x.tok)!
+    ok = block(l, body)!
+    (*l).nlp -= 1
+    ok = place(l, pl)!
+    if post_name >= 0 {
+        let mut t: i32 = -1
+        let v = rv(l, post)!
+        let a = name_target(l, post_name, &t)!
+        let it = irt(l, t)
+        if is_txt(l, x.b, b"=") {
+            ok = store(l, it, a, 0, v)!
+        } else {
+            let old = load(l, it, a, 0)!
+            let mut op = Op.Add
+            if is_txt(l, x.b, b"-=") {
+                op = Op.Sub
+            }
+            let nv = op2(l, op, it, old, v)!
+            ok = store(l, it, a, 0, nv)!
+        }
+    }
+    ok = jmp(l, top)!
+    ok = place(l, end)!
+    ok = pop_scope(l, false)!
+    return 0
+}
+
+fn ret(l: *mut Lw, s: i32): !i32 {
+    let x = nd(l, s)
+    let mut ok = 0
+    if (*l).is_main {
+        let mut v = -1
+        if x.a >= 0 {
+            let r = rv(l, x.a)!
+            v = conv(l, I32, irt(l, rt(l, x.a)), r)!
+        } else {
+            v = kconst(l, I32, 0)!
+        }
+        ok = run_defers(l, 0)!
+        ok = ins(l, Op.Ret, I32, -1, v, -1, -1, 0)!
+        return 0
+    }
+    if x.a < 0 {
+        ok = run_defers(l, 0)!
+        ok = ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
+        return 0
+    }
+    if is_agg(l, (*l).ret) {
+        let sp = slot_addr(l, (*l).sret_off)!
+        let dst = load(l, PTR, sp, 0)!
+        ok = store_as(l, x.a, dst, (*l).ret)!
+        ok = run_defers(l, 0)!
+        ok = ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
+        return 0
+    }
+    let v = rv(l, x.a)!
+    ok = run_defers(l, 0)!
+    ok = ins(l, Op.Ret, irt(l, (*l).ret), -1, v, -1, -1, 0)!
+    return 0
+}
+
+// Writes value v (scalar register or aggregate address) of type t at dst.
+fn put(l: *mut Lw, dst: i32, t: i32, v: i32): !i32 {
+    if is_agg(l, t) {
+        let sz = size(l, t)!
+        return copy(l, dst, v, sz)!
+    }
+    return store(l, irt(l, t), dst, 0, v)!
+}
+
+// A value that may alias a place is copied to a temporary first.
+fn stable(l: *mut Lw, e: i32, t: i32): !i32 {
+    let v = rv(l, e)!
+    if !is_agg(l, t) || fresh(l, e) {
+        return v
+    }
+    let tmp = temp(l, t)!
+    let ok = put(l, tmp, t, v)!
+    return tmp
+}
+
+fn assign(l: *mut Lw, s: i32): !i32 {
+    let x = nd(l, s)
+    let t = rt(l, x.a)
+    let mut ok = 0
+    if x.c < 0 {
+        if is_agg(l, t) {
+            let tmp = temp(l, t)!
+            ok = store_as(l, x.b, tmp, t)!
+            let dst = addr(l, x.a)!
+            ok = put(l, dst, t, tmp)!
+            return 0
+        }
+        let v = rv(l, x.b)!
+        let dst = addr(l, x.a)!
+        return store(l, irt(l, t), dst, 0, v)!
+    }
+    // compound: target evaluated once
+    let dst = addr(l, x.a)!
+    let it = irt(l, t)
+    let old = load(l, it, dst, 0)!
+    let v = rv(l, x.b)!
+    let os = txt(l, x.c)
+    let op = binop(os[0:os.len - 1])
+    let nv = op2(l, op, it, old, v)!
+    return store(l, it, dst, 0, nv)!
+}
+
+fn multi_assign(l: *mut Lw, s: i32): !i32 {
+    let x = nd(l, s)
+    let n = x.a
+    let mut vals: [64]i32
+    if n > 64 {
+        return error(unsup(l, x.tok, b"more than 64 targets"))
+    }
+    for i in 0..<n {
+        let tgt = kid(l, x.extra, i)
+        vals[i] = stable(l, kid(l, x.extra, n + i), rt(l, tgt))!
+    }
+    for i in 0..<n {
+        let tgt = kid(l, x.extra, i)
+        let dst = addr(l, tgt)!
+        let ok = put(l, dst, rt(l, tgt), vals[i])!
+    }
+    return 0
+}
+
+fn let_struct(l: *mut Lw, s: i32): !i32 {
+    let x = nd(l, s)
+    let st = rt(l, s)
+    let src = stable(l, x.a, st)!
+    let sx = ty(l, st).a
+    let n = cnt(l, x.extra) / 2
+    for i in 0..<n {
+        let ft = kid(l, x.extra, 2 * i)
+        let nt = kid(l, x.extra, 2 * i + 1)
+        let j = sfield(l, sx, txt(l, ft))
+        let fty = sfield_ty(l, sx, j)
+        let off = foffset(l, sx, j)!
+        let li = def_local(l, txt(l, nt), fty, false, nt)!
+        let dst = local_addr(l, li)!
+        let fa = addk(l, src, off)!
+        let ok = put(l, dst, fty, value_at(l, fa, fty)!)!
+    }
+    return 0
+}
+
+// The value of type t stored at address a: a load, or a itself.
+fn value_at(l: *mut Lw, a: i32, t: i32): !i32 {
+    if is_agg(l, t) {
+        return a
+    }
+    return load(l, irt(l, t), a, 0)!
+}
+
+fn let_array(l: *mut Lw, s: i32): !i32 {
+    let x = nd(l, s)
+    let at = rt(l, s)
+    let src = stable(l, x.a, at)!
+    let ax = ty(l, at)
+    let et = ax.a
+    let es = size(l, et)!
+    let mut base = src
+    if ax.kind == types.Tk.Slice {
+        base = load(l, PTR, src, 0)!
+    }
+    let n = cnt(l, x.extra)
+    for i in 0..<n {
+        let nt = kid(l, x.extra, i)
+        if is_txt(l, nt, b"_") {
+            continue
+        }
+        let li = def_local(l, txt(l, nt), et, false, nt)!
+        let dst = local_addr(l, li)!
+        let ea = addk(l, base, es * cast(i64, i))!
+        let ok = put(l, dst, et, value_at(l, ea, et)!)!
+    }
+    return 0
+}
+
+fn struct_assign(l: *mut Lw, s: i32): !i32 {
+    let x = nd(l, s)
+    let st = rt(l, x.a)
+    let src = stable(l, x.a, st)!
+    let sx = ty(l, st).a
+    let n = cnt(l, x.extra) / 2
+    for i in 0..<n {
+        let ft = kid(l, x.extra, 2 * i)
+        let tgt = kid(l, x.extra, 2 * i + 1)
+        let j = sfield(l, sx, txt(l, ft))
+        let fty = sfield_ty(l, sx, j)
+        let off = foffset(l, sx, j)!
+        let fa = addk(l, src, off)!
+        let v = value_at(l, fa, fty)!
+        let dst = addr(l, tgt)!
+        let ok = put(l, dst, fty, v)!
+    }
+    return 0
+}
+
+// ---- functions ----
+
+fn qual_name(l: *mut Lw, fi: i32): ![]u8 {
+    let r = (*(*l).p).funcs.r[fi]
+    let f = load.file((*l).p, r.file)
+    let x = (*f).t.nodes[r.node]
+    let mname = (*(*l).p).mods[(*f).mid]
+    let name = load.text((*l).p, r.file, x.a)
+    let mut mid = mname[0:0]
+    if x.b >= 0 {
+        mid = load.text((*l).p, r.file, x.b)
+    } else {
+        let sig = (*f).t.nodes[x.c]
+        if sig.a >= 0 {
+            let rt0 = (*(*l).c).fn_recv[fi]
+            mid = type_name(l, rt0)
+        }
+    }
+    let mut n = mname.len + 1 + name.len
+    if mid.len > 0 {
+        n += mid.len + 1
+    }
+    let mut b = arena.alloc_u8((*l).a, n)!
+    let mut k = 0
+    for i in 0..<mname.len {
+        b[k] = mname[i]
+        k += 1
+    }
+    b[k] = 46
+    k += 1
+    if mid.len > 0 {
+        for i in 0..<mid.len {
+            b[k] = mid[i]
+            k += 1
+        }
+        b[k] = 46
+        k += 1
+    }
+    for i in 0..<name.len {
+        b[k] = name[i]
+        k += 1
+    }
+    return b
+}
+
+// The declared name of a struct / enum type (a pointer: its pointee).
+fn type_name(l: *mut Lw, t: i32): []u8 {
+    let mut x = ty(l, t)
+    if x.kind == types.Tk.Ptr {
+        x = ty(l, x.a)
+    }
+    if x.kind == types.Tk.Struct {
+        let r = (*(*l).p).structs.r[x.a]
+        return load.text((*l).p, r.file, (*load.file((*l).p, r.file)).t.nodes[r.node].a)
+    }
+    if x.kind == types.Tk.Enum {
+        let r = (*(*l).p).enums.r[x.a]
+        return load.text((*l).p, r.file, (*load.file((*l).p, r.file)).t.nodes[r.node].a)
+    }
+    return b"?"
+}
+
+fn reset_fn(l: *mut Lw) {
+    (*l).nr = 0
+    (*l).nl = 0
+    (*l).frame = 0
+    (*l).nloc = 0
+    (*l).hlo = 0
+    (*l).hhi = 0
+    (*l).nsc = 0
+    (*l).ndef = 0
+    (*l).nlp = 0
+    (*l).sret_off = -1
+}
+
+// Closes function fi: instructions since start, labels copied out.
+fn finish_fn(l: *mut Lw, fi: i32, start: i32): !i32 {
+    let g = (*l).g
+    (*g).fns[fi].start = start
+    (*g).fns[fi].end = (*g).n
+    (*g).fns[fi].nr = (*l).nr
+    (*g).fns[fi].frame = roundup((*l).frame, 16)
+    (*g).fns[fi].lab = (*g).nlab
+    (*g).fns[fi].nl = (*l).nl
+    for i in 0..<(*l).nl {
+        let ok = add_lab(g, (*l).labat[i])!
+    }
+    return 0
+}
+
+// A parameter in register r: a local in a slot, or a ref local.
+fn param(l: *mut Lw, name: []u8, t: i32, r: i32, is_ref: bool, tok: i32): !i32 {
+    let i = def_local(l, name, t, is_ref, tok)!
+    let s = slot_addr(l, (*l).loff[i])!
+    if is_ref {
+        return store(l, PTR, s, 0, r)!
+    }
+    return store(l, irt(l, t), s, 0, r)!
+}
+
+// Name and kind of every function, before any body (calls need them).
+fn declare_fn(l: *mut Lw, fi: i32): !i32 {
+    let g = (*l).g
+    let r = (*(*l).p).funcs.r[fi]
+    let old = enter(l, r.file)
+    let x = nd(l, r.node)
+    (*g).fns[fi].name = qual_name(l, fi)!
+    if x.extra < 0 {
+        (*g).fns[fi].kind = 2
+        if tab.eq((*(*l).p).mods[(*l).cm], b"sys") && is_txt(l, x.a, b"call6") {
+            (*g).fns[fi].kind = 1
+        }
+    }
+    let o = enter(l, old)
+    return 0
+}
+
+fn lower_fn(l: *mut Lw, fi: i32): !i32 {
+    let g = (*l).g
+    if (*g).fns[fi].kind != 0 {
+        return 0
+    }
+    let r = (*(*l).p).funcs.r[fi]
+    let old = enter(l, r.file)
+    let x = nd(l, r.node)
+    let sig = nd(l, x.c)
+    reset_fn(l)
+    (*l).fi = fi
+    (*l).is_main = fi == (*g).main
+    (*l).ret = (*(*l).c).fn_ret[fi]
+    let start = (*g).n
+    let mut ok = 0
+    if is_float(l, (*l).ret) {
+        return error(unsup(l, x.tok, b"a floating-point result"))
+    }
+    let sret = !(*l).is_main && is_agg(l, (*l).ret)
+    let mut np = cnt(l, sig.extra)
+    if sret {
+        np += 1
+    }
+    if sig.a >= 0 {
+        np += 1
+    }
+    (*l).nr = np
+    let mut ri = 0
+    if sret {
+        (*l).sret_off = alloc_slot(l, 8, 8)
+        let s = slot_addr(l, (*l).sret_off)!
+        ok = store(l, PTR, s, 0, 0)!
+        ri = 1
+    }
+    if sig.a >= 0 {
+        let rcv = nd(l, sig.a)
+        let rty = (*(*l).c).fn_recv[fi]
+        let by_ref = rcv.b == 1 || is_agg(l, rty)
+        ok = param(l, txt(l, rcv.tok), rty, ri, by_ref, rcv.tok)!
+        ri += 1
+    }
+    let np0 = cnt(l, sig.extra)
+    for j in 0..<np0 {
+        let pn = kid(l, sig.extra, j)
+        let pt = rt(l, pn)
+        ok = param(l, txt(l, nd(l, pn).tok), pt, ri, is_agg(l, pt), nd(l, pn).tok)!
+        ri += 1
+    }
+    ok = block(l, x.extra)!
+    if (*l).is_main {
+        let z = kconst(l, I32, 0)!
+        ok = ins(l, Op.Ret, I32, -1, z, -1, -1, 0)!
+    } else if tk(l, (*l).ret) == types.Tk.Void {
+        ok = ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
+    } else {
+        ok = ins(l, Op.Trap, I64, -1, -1, -1, -1, 2)!
+    }
+    (*g).fns[fi].np = np
+    (*g).fns[fi].sret = sret
+    if (*l).is_main {
+        (*g).fns[fi].ret = I32
+    } else if sret || tk(l, (*l).ret) == types.Tk.Void {
+        (*g).fns[fi].ret = VOID
+    } else {
+        (*g).fns[fi].ret = irt(l, (*l).ret)
+    }
+    ok = finish_fn(l, fi, start)!
+    let o = enter(l, old)
+    return 0
+}
+
+fn glob_addr(l: *mut Lw, gi: i32): !i32 {
+    let r = newr(l)
+    let ok = ins(l, Op.Glob, PTR, r, -1, -1, -1, (*(*l).g).goff[gi])!
+    return r
+}
+
+// $init: the globals in declaration order, before main.
+fn lower_init(l: *mut Lw): !i32 {
+    let g = (*l).g
+    let p = (*l).p
+    reset_fn(l)
+    let fi = (*g).init
+    (*l).fi = fi
+    (*l).is_main = false
+    (*l).ret = types.VOID
+    (*g).fns[fi].name = b"$init"
+    (*g).fns[fi].ret = VOID
+    let start = (*g).n
+    let mut ok = 0
+    for i in 0..<(*p).globals.n {
+        let r = (*p).globals.r[i]
+        let old = enter(l, r.file)
+        let x = nd(l, r.node)
+        let t = (*(*l).c).glob_ty[i]
+        if x.c >= 0 {
+            let dst = glob_addr(l, i)!
+            ok = store_as(l, x.c, dst, t)!
+        }
+        let o = enter(l, old)
+    }
+    ok = ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
+    return finish_fn(l, fi, start)!
+}
+
+// Lowers the checked program; the error (E_IR) is in g.
+pub fn lower(a: *mut arena.Arena, c: *mut check.Ck, p: *mut load.Prog, g: *mut Prog): !i32 {
+    let mut lw = Lw.new(a, c, p, g)!
+    let l = &lw
+    // main: the free function `main` (the checker allows one)
+    for i in 0..<(*p).funcs.n {
+        let r = (*p).funcs.r[i]
+        let f = load.file(p, r.file)
+        let x = (*f).t.nodes[r.node]
+        let sig = (*f).t.nodes[x.c]
+        if sig.a < 0 && x.b < 0 && tab.eq(load.text(p, r.file, x.a), b"main") {
+            (*g).main = i
+        }
+    }
+    // globals
+    let mut off: i64 = 0
+    for i in 0..<(*p).globals.n {
+        let t = (*c).glob_ty[i]
+        (*l).cf = (*p).globals.r[i].file
+        if is_float(l, t) {
+            return error(unsup(l, (*load.file(p, (*l).cf)).t.nodes[(*p).globals.r[i].node].tok, b"a floating-point global"))
+        }
+        let s = size(l, t)!
+        let al = align(l, t)!
+        off = roundup(off, al)
+        (*g).goff[i] = off
+        off += s
+    }
+    (*g).gsize = roundup(off, 16)
+    let mut ok = 0
+    for i in 0..<(*p).funcs.n {
+        ok = declare_fn(l, i)!
+    }
+    for i in 0..<(*p).funcs.n {
+        ok = lower_fn(l, i)!
+    }
+    ok = lower_init(l)!
+    return 0
+}

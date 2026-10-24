@@ -1,0 +1,86 @@
+// IR golden: !T results — error(), `!` propagation, `or` with `err`,
+// aggregate results, defers on the error path; the exit code.
+module main
+import os
+import out
+
+const E_NEG: i32 = 22
+const E_BIG: i32 = 34
+
+struct Pair {
+    a: i64
+    b: i64
+}
+
+fn half(x: i32): !i32 {
+    if x < 0 {
+        return error(E_NEG)
+    }
+    if x > 1000 {
+        return error(E_BIG)
+    }
+    return x / 2
+}
+
+fn quarter(x: i32): !i32 {
+    let h = half(x)!
+    return half(h)!
+}
+
+fn pair(x: i32): !Pair {
+    let q = quarter(x)!
+    return Pair { a: cast(i64, q), b: cast(i64, x) }
+}
+
+fn logged(o: *mut out.Out, x: i32): !i32 {
+    defer (*o).lit(b"[leave] ")
+    let v = quarter(x)!
+    (*o).lit(b"[ok] ")
+    return v
+}
+
+fn show(o: *mut out.Out, x: i32) {
+    let v = quarter(x) or {
+        (*o).lit(b"err ")
+        (*o).dec(cast(i64, err))
+        (*o).nl()
+        return
+    }
+    (*o).lit(b"val ")
+    (*o).dec(cast(i64, v))
+    (*o).nl()
+}
+
+fn run(o: *mut out.Out): !i32 {
+    show(o, 100)
+    show(o, -4)
+    show(o, 5000)
+    let pr = pair(40)!
+    (*o).dec(pr.a + pr.b)
+    (*o).nl()
+    let z = pair(-1) or {
+        Pair { a: -1, b: cast(i64, err) }
+    }
+    (*o).dec(z.a * 100 + z.b)
+    (*o).nl()
+    let a = logged(o, 64) or { -1 }
+    let b = logged(o, -64) or { -2 }
+    (*o).dec(cast(i64, a + b))
+    (*o).nl()
+    let mut ok = 0
+    ok = half(3000)!
+    (*o).lit(b"not reached")
+    return 0
+}
+
+fn main() {
+    let mut o = out.Out.stdout()
+    let code = run(&o) or {
+        o.lit(b"run failed ")
+        o.dec(cast(i64, err))
+        o.nl()
+        err + 1
+    }
+    o.flush_quiet()
+    os.exit(code)
+}
