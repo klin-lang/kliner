@@ -1,7 +1,7 @@
 # Kliner — roadmap
 
 Stages in order. Decisions behind them: [00-decisions.md](00-decisions.md).
-Status: **design phase, no code yet.**
+Status: **stage 1 — runtime (`rt/`) built by Klin; no compiler code yet.**
 
 ---
 
@@ -12,7 +12,8 @@ Proposal: [02-core-subset.md](02-core-subset.md).
 - [ ] Define the Klin subset used to write the compiler (no `cimport`, no `asm`)
 - [ ] Document what is in the shared core and what is Klin-only
 - [ ] Mini runtime on Linux syscalls: `_start`, exit, memory/allocator
-- [ ] Runtime: files (open/read/write/close), output, errors
+  (exit + arena done in `rt/`; `_start` is emitted by the backend, stage 4)
+- [x] Runtime: files (open/read/write/close), output, errors — `rt/`, tests: `scripts/test.sh`
 
 ## 2. Frontend in Klin
 

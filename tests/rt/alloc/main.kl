@@ -1,0 +1,66 @@
+// arena: alignment, zeroing, mark/reset clears reused memory, ENOMEM, free_all.
+module main
+import arena
+import os
+import out
+
+fn run(o: *mut out.Out): !i32 {
+    let mut a = arena.Arena.new(4096)!
+    defer arena.free_all(&a)
+    let mut b = arena.alloc_u8(&a, 3)!
+    b[0] = 7
+    b[1] = 8
+    b[2] = 9
+    (*o).lit(b"u8 len ")
+    (*o).dec(cast(i64, b.len))
+    (*o).lit(b" used ")
+    (*o).dec(arena.mark(&a))
+    (*o).nl()
+    let m = arena.mark(&a)
+    let mut w = arena.alloc_i64(&a, 4)!
+    w[3] = -1
+    let mut q = arena.alloc_i32(&a, 5)!
+    q[4] = 12345
+    (*o).lit(b"used ")
+    (*o).dec(arena.mark(&a))
+    (*o).lit(b" sum ")
+    (*o).dec(w[3] + cast(i64, q[4]))
+    (*o).nl()
+    arena.reset(&a, m)
+    let w2 = arena.alloc_i64(&a, 4)!
+    let q2 = arena.alloc_i32(&a, 5)!
+    (*o).lit(b"after reset ")
+    (*o).dec(w2[3])
+    (*o).lit(b" ")
+    (*o).dec(cast(i64, q2[4]))
+    (*o).lit(b" kept ")
+    (*o).dec(cast(i64, b[2]))
+    (*o).nl()
+    let big = arena.alloc_u8(&a, 5000) or {
+        (*o).lit(b"full ")
+        (*o).errno_name(err)
+        (*o).nl()
+        arena.alloc_u8(&a, 0)!
+    }
+    let mut s = arena.alloc_slices_u8(&a, 2)!
+    s[0] = b"ab"
+    s[1] = b[0:2]
+    (*o).lit(b"slices ")
+    (*o).dec(cast(i64, s[0].len + s[1].len))
+    (*o).nl()
+    return 0
+}
+
+fn main() {
+    let mut o = out.Out.stdout()
+    let mut e = out.Out.stderr()
+    let code = run(&o) or {
+        e.lit(b"error: ")
+        e.errno_name(err)
+        e.nl()
+        1
+    }
+    o.flush_quiet()
+    e.flush_quiet()
+    os.exit(code)
+}

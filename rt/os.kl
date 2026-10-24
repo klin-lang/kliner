@@ -1,0 +1,173 @@
+// module os — files, exit, arguments over sys.call6 (docs/02-core-subset.md C6).
+// Portable core Klin: identical in stage1 (Klin + rt/bootstrap) and stage2+.
+module os
+import sys
+import arena
+
+// Same values on x86-64, ARM64 and RV64 for everything used here.
+pub const AT_FDCWD: i64 = -100
+pub const O_RDONLY: i64 = 0
+pub const O_WRONLY: i64 = 1
+pub const O_RDWR: i64 = 2
+pub const O_CREAT: i64 = 0o100
+pub const O_TRUNC: i64 = 0o1000
+pub const SEEK_SET: i64 = 0
+pub const SEEK_END: i64 = 2
+pub const PROT_READ: i64 = 1
+pub const PROT_WRITE: i64 = 2
+pub const MAP_PRIVATE: i64 = 2
+pub const MAP_ANONYMOUS: i64 = 0x20
+
+// errno values the runtime itself produces or retries.
+pub const EINTR: i32 = 4
+pub const ENOMEM: i32 = 12
+pub const EINVAL: i32 = 22
+
+pub struct Args {
+    bytes: []u8 // all arguments, NUL-separated (as in /proc/self/cmdline)
+    list: [][]u8 // each argument: a subslice of `bytes`, without the NUL
+}
+
+// Kernel return value -> !i64: -4095..-1 is -errno.
+pub fn check(r: i64): !i64 {
+    if r < 0 && r >= -4095 {
+        return error(cast(i32, -r))
+    }
+    return r
+}
+
+// path: NUL-terminated bytes, e.g. b"/proc/self/cmdline\0" or Args.arg_z.
+pub fn open_read(path: []u8): !i32 {
+    let fd = check(sys.call6(sys.NR_OPENAT, AT_FDCWD, sys.addr_u8(path), O_RDONLY, 0, 0, 0))!
+    return cast(i32, fd)
+}
+
+// O_WRONLY | O_CREAT | O_TRUNC, mode 0o755 (the compiler's output is executable).
+pub fn open_write(path: []u8): !i32 {
+    let fd = check(sys.call6(sys.NR_OPENAT, AT_FDCWD, sys.addr_u8(path), O_WRONLY | O_CREAT | O_TRUNC, 0o755, 0, 0))!
+    return cast(i32, fd)
+}
+
+pub fn close(fd: i32): !i32 {
+    let r = check(sys.call6(sys.NR_CLOSE, cast(i64, fd), 0, 0, 0, 0, 0))!
+    return 0
+}
+
+// close, ignore error (for `defer`).
+pub fn close_quiet(fd: i32) {
+    let r = sys.call6(sys.NR_CLOSE, cast(i64, fd), 0, 0, 0, 0, 0)
+}
+
+// Up to buf.len bytes; 0 = end of file. Retries EINTR.
+pub fn read(fd: i32, buf: []u8): !i32 {
+    while true {
+        let r = sys.call6(sys.NR_READ, cast(i64, fd), sys.addr_u8(buf), cast(i64, buf.len), 0, 0, 0)
+        if r == -4 {
+            continue
+        }
+        let n = check(r)!
+        return cast(i32, n)
+    }
+    return 0
+}
+
+// All of buf; retries partial writes and EINTR.
+pub fn write_all(fd: i32, buf: []u8): !i32 {
+    let mut done = 0
+    while done < buf.len {
+        let rest = buf[done:buf.len]
+        let r = sys.call6(sys.NR_WRITE, cast(i64, fd), sys.addr_u8(rest), cast(i64, rest.len), 0, 0, 0)
+        if r == -4 {
+            continue
+        }
+        let w = check(r)!
+        done = done + cast(i32, w)
+    }
+    return done
+}
+
+// lseek(SEEK_END) + lseek(SEEK_SET). 0 for /proc files.
+pub fn file_size(fd: i32): !i64 {
+    let n = check(sys.call6(sys.NR_LSEEK, cast(i64, fd), 0, SEEK_END, 0, 0, 0))!
+    let z = check(sys.call6(sys.NR_LSEEK, cast(i64, fd), 0, SEEK_SET, 0, 0, 0))!
+    return n
+}
+
+// Reads fd to the end into the arena. `hint` = expected size (0 if unknown);
+// the buffer doubles when the file is larger (pipes, /proc, growing files).
+fn read_all(a: *mut arena.Arena, fd: i32, hint: i64): ![]u8 {
+    let mut cap = 4096
+    if hint > 0 && hint < 0x3fff0000 { // .len is i32; else: unknown size
+        cap = cast(i32, hint) + 1 // +1: EOF seen without a second buffer
+    }
+    if cap < 4096 {
+        cap = 4096
+    }
+    let mut buf = arena.alloc_u8(a, cap)!
+    let mut got = 0
+    while true {
+        if got == cap {
+            if cap >= 0x3fff0000 {
+                return error(ENOMEM)
+            }
+            let mut bigger = arena.alloc_u8(a, cap * 2)!
+            for i in 0..<got {
+                bigger[i] = buf[i]
+            }
+            buf = bigger
+            cap = cap * 2
+        }
+        let n = read(fd, buf[got:cap])!
+        if n == 0 {
+            break
+        }
+        got = got + n
+    }
+    return buf[0:got]
+}
+
+pub fn read_file(a: *mut arena.Arena, path: []u8): ![]u8 {
+    let fd = open_read(path)!
+    defer close_quiet(fd)
+    let size = file_size(fd) or { cast(i64, 0) } // not seekable: read to EOF anyway
+    return read_all(a, fd, size)
+}
+
+// v0: arguments from /proc/self/cmdline (C7.4). Later _start passes argv.
+pub fn args(a: *mut arena.Arena): !Args {
+    let fd = open_read(b"/proc/self/cmdline\0")!
+    defer close_quiet(fd)
+    let bytes = read_all(a, fd, 0)!
+    let mut count = 0
+    for i in 0..<bytes.len {
+        if bytes[i] == 0 {
+            count = count + 1
+        }
+    }
+    let mut list = arena.alloc_slices_u8(a, count)!
+    let mut start = 0
+    let mut k = 0
+    for i in 0..<bytes.len {
+        if bytes[i] == 0 {
+            list[k] = bytes[start:i]
+            k = k + 1
+            start = i + 1
+        }
+    }
+    let mut r: Args
+    r.bytes = bytes
+    r.list = list
+    return r
+}
+
+// Argument i with its terminating NUL, ready for open_read / open_write.
+pub fn (x: Args) arg_z(i: i32): []u8 {
+    let s = x.list[i]
+    let off = cast(i32, sys.addr_u8(s) - sys.addr_u8(x.bytes))
+    return x.bytes[off:off + s.len + 1]
+}
+
+// exit_group: ends the process, does not run `defer`s — flush `out` first.
+pub fn exit(code: i32) {
+    let r = sys.call6(sys.NR_EXIT_GROUP, cast(i64, code), 0, 0, 0, 0, 0)
+}

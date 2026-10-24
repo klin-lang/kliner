@@ -1,0 +1,158 @@
+// module out — buffered stdout / stderr (docs/02-core-subset.md C6).
+// Explicit buffer, explicit flush. `exit_group` skips `defer`s, so main
+// flushes before os.exit.
+module out
+import os
+
+const BUF: i32 = 4096
+
+pub struct Out {
+    fd: i32
+    buf: [BUF]u8
+    n: i32
+}
+
+// No initializer for `buf`: zeroed `let mut` (D6), then set fd.
+pub fn Out.stdout(): Out {
+    let mut o: Out
+    o.fd = 1
+    return o
+}
+
+pub fn Out.stderr(): Out {
+    let mut o: Out
+    o.fd = 2
+    return o
+}
+
+pub fn (mut o: Out) flush(): !i32 {
+    let n = o.n
+    o.n = 0
+    return os.write_all(o.fd, o.buf[0:n])
+}
+
+// flush, ignore error (for `defer`; Klin rejects an ignored !T).
+pub fn (mut o: Out) flush_quiet() {
+    let r = o.flush() or { 0 }
+}
+
+// A whole slice: o.lit(b"error: "), o.lit(src[a:b]).
+pub fn (mut o: Out) lit(b: []u8) {
+    let mut i = 0
+    while i < b.len {
+        if o.n == BUF {
+            o.flush_quiet()
+        }
+        let mut k = BUF - o.n
+        if k > b.len - i {
+            k = b.len - i
+        }
+        for j in 0..<k {
+            o.buf[o.n + j] = b[i + j]
+        }
+        o.n = o.n + k
+        i = i + k
+    }
+}
+
+pub fn (mut o: Out) nl() {
+    o.lit(b"\n")
+}
+
+pub fn (mut o: Out) dec(v: i64) {
+    let mut tmp: [20]u8
+    let mut i = 20
+    let neg = v < 0
+    let mut x = v
+    if x == 0 {
+        o.lit(b"0")
+        return
+    }
+    // Digits from the negative side: -i64.min does not exist.
+    if x > 0 {
+        x = -x
+    }
+    while x != 0 {
+        i = i - 1
+        tmp[i] = cast(u8, 48 - x % 10)
+        x = x / 10
+    }
+    if neg {
+        o.lit(b"-")
+    }
+    o.lit(tmp[i:20])
+}
+
+// 0x-prefixed, lowercase, no leading zeros.
+pub fn (mut o: Out) hex(v: u64) {
+    let digits = b"0123456789abcdef"
+    let mut tmp: [16]u8
+    let mut i = 16
+    let mut x = v
+    if x == 0 {
+        o.lit(b"0x0")
+        return
+    }
+    while x != 0 {
+        i = i - 1
+        tmp[i] = digits[cast(i32, x & 15)]
+        x = x >> 4
+    }
+    o.lit(b"0x")
+    o.lit(tmp[i:16])
+}
+
+// errno name for messages; decimal if unknown.
+pub fn (mut o: Out) errno_name(e: i32) {
+    match e {
+        1 {
+            o.lit(b"EPERM")
+        }
+        2 {
+            o.lit(b"ENOENT")
+        }
+        4 {
+            o.lit(b"EINTR")
+        }
+        5 {
+            o.lit(b"EIO")
+        }
+        9 {
+            o.lit(b"EBADF")
+        }
+        12 {
+            o.lit(b"ENOMEM")
+        }
+        13 {
+            o.lit(b"EACCES")
+        }
+        17 {
+            o.lit(b"EEXIST")
+        }
+        20 {
+            o.lit(b"ENOTDIR")
+        }
+        21 {
+            o.lit(b"EISDIR")
+        }
+        22 {
+            o.lit(b"EINVAL")
+        }
+        24 {
+            o.lit(b"EMFILE")
+        }
+        27 {
+            o.lit(b"EFBIG")
+        }
+        28 {
+            o.lit(b"ENOSPC")
+        }
+        36 {
+            o.lit(b"ENAMETOOLONG")
+        }
+        else {
+            o.lit(b"errno ")
+            o.dec(cast(i64, e))
+        }
+    }
+}
