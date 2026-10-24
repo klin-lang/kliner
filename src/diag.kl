@@ -1,0 +1,157 @@
+// module diag — one diagnostic per compile step (docs/02-core-subset.md
+// C2 data model, stage 3). The lexer, the parser and later the checker
+// report into a `Diag` reached through `*mut`; nothing is global.
+//
+// A diagnostic is a byte offset into `src` plus a message built in a
+// fixed buffer; `pos` turns the offset into line:column through the line
+// table `lines` (filled by the lexer). Printed as `path:line:col: message`
+// (or `line:col: message` with an empty path), an optional `note:` line
+// below it.
+module diag
+import arena
+import out
+
+// Error code of a failed step (outside the errno range of `os`).
+pub const E_DIAG: i32 = 1000
+
+const MSG: i32 = 240
+
+pub struct Diag {
+    path: []u8
+    src: []u8
+    lines: []i32 // lines[k] = offset of the first byte of line k + 1
+    failed: bool
+    off: i32 // offset of the error in src
+    msg: [MSG]u8
+    n: i32
+    note: []u8 // extra line, empty when none
+}
+
+pub fn Diag.new(path: []u8, src: []u8): Diag {
+    let mut d: Diag
+    d.path = path
+    d.src = src
+    return d
+}
+
+// Line table of src: offset of each line start, in the arena.
+pub fn line_table(a: *mut arena.Arena, src: []u8): ![]i32 {
+    let mut nl = 1
+    for i in 0..<src.len {
+        if src[i] == '\n' {
+            nl += 1
+        }
+    }
+    let mut lines = arena.alloc_i32(a, nl)!
+    let mut k = 1
+    for i in 0..<src.len {
+        if src[i] == '\n' {
+            lines[k] = i + 1
+            k += 1
+        }
+    }
+    return lines
+}
+
+// Line (from 1) of an offset.
+pub fn line(d: *mut Diag, off: i32): i32 {
+    let lines = (*d).lines
+    let mut lo = 0
+    let mut hi = lines.len - 1
+    while lo < hi {
+        let mid = (lo + hi + 1) / 2
+        if lines[mid] <= off {
+            lo = mid
+        } else {
+            hi = mid - 1
+        }
+    }
+    return lo + 1
+}
+
+// Offset -> [line, column], both from 1. The column counts UTF-8 code
+// points (bytes that are not 10xxxxxx); Klin counts UTF-16 units, which
+// differs only after a character outside the BMP (tests/lex/README.md).
+pub fn pos(d: *mut Diag, off: i32): [2]i32 {
+    let ln = line(d, off)
+    let s = (*d).src
+    let mut col = 1
+    for i in (*d).lines[ln - 1]..<off {
+        if (s[i] & 0xc0) != 0x80 {
+            col += 1
+        }
+    }
+    return [ln, col]
+}
+
+// Starts the diagnostic at off with a first message part. Only the first
+// error of a step is kept (fail-fast, like Klin's CLI).
+pub fn fail(d: *mut Diag, off: i32, msg: []u8): i32 {
+    if !(*d).failed {
+        (*d).failed = true
+        (*d).off = off
+        (*d).n = 0
+        (*d).note = b""
+        add(d, msg)
+    }
+    return E_DIAG
+}
+
+// Appends to the message (cut at the buffer size).
+pub fn add(d: *mut Diag, s: []u8) {
+    for i in 0..<s.len {
+        if (*d).n < MSG {
+            (*d).msg[(*d).n] = s[i]
+            (*d).n += 1
+        }
+    }
+}
+
+pub fn add_dec(d: *mut Diag, v: i32) {
+    let mut tmp: [12]u8
+    let mut i = 12
+    let mut x = v
+    if x == 0 {
+        add(d, b"0")
+        return
+    }
+    while x > 0 {
+        i -= 1
+        tmp[i] = cast(u8, 48 + x % 10)
+        x = x / 10
+    }
+    add(d, tmp[i:12])
+}
+
+pub fn set_note(d: *mut Diag, note: []u8) {
+    (*d).note = note
+}
+
+pub fn message(d: *mut Diag): []u8 {
+    return (*d).msg[:(*d).n]
+}
+
+// `line:col: message` without the path (dump tools, goldens).
+pub fn write_short(d: *mut Diag, o: *mut out.Out) {
+    let [ln, col] = pos(d, (*d).off)
+    (*o).dec(cast(i64, ln))
+    (*o).lit(b":")
+    (*o).dec(cast(i64, col))
+    (*o).lit(b": ")
+    (*o).lit(message(d))
+    (*o).nl()
+}
+
+// `path:line:col: message` and the note, for users.
+pub fn write(d: *mut Diag, o: *mut out.Out) {
+    if (*d).path.len > 0 {
+        (*o).lit((*d).path)
+        (*o).lit(b":")
+    }
+    write_short(d, o)
+    if (*d).note.len > 0 {
+        (*o).lit(b"note: ")
+        (*o).lit((*d).note)
+        (*o).nl()
+    }
+}

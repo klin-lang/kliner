@@ -1,0 +1,1 @@
+note: `$name` / `${expr}` in strings: docs/02-core-subset.md C10; write `\$` for a literal `$`

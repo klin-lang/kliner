@@ -1,0 +1,3 @@
+fn f() {
+    let a = geo.Point{x: 1}
+}

@@ -1,0 +1,60 @@
+// declarations: module, imports, attributes, struct / enum / const /
+// global / fn, receivers, associated functions, types
+module demo
+import arena
+import out o
+import "../lib/util.kl"
+import "board/pins" pins
+
+@[cimport("stdio.h")]
+fn puts(s: *u8): i32
+
+@[packed, section(".data")]
+@[used]
+pub struct Pair {
+    a, a2: i32
+    b: *mut volatile u8
+    c: []Pair
+    d: [4]u8
+    e: [N * 2 + 1]i64
+    f: [o.SIZE]u8
+    g: fn(i32, []u8): !i32
+    h: fn()
+    i: !*u8
+}
+
+enum Color {
+    Red
+    Green = 4
+    Blue
+}
+
+pub enum Small: u8 {
+    A = 0x01
+    B = 1 << 3
+}
+
+const N: i32 = 3
+pub const NAME: []u8 = b"demo"
+let mut counter: i64 = 0
+pub let limit: i32 = N * 4
+
+fn Pair.new(a: i32): Pair {
+    return Pair{a: a, b: null, c: [], d: [1, 2, 3, 4], e: [], f: [], g: null, h: null, i: null}
+}
+
+pub fn (p: Pair) sum(): i32 {
+    return p.a
+}
+
+fn (mut p: Pair) bump(by: i32) {
+    p.a += by
+}
+
+pub async fn later(x: i32) {
+    other(x).await
+    let t = tick().await
+}
+
+fn noop() {
+}

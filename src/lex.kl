@@ -2,10 +2,11 @@
 //
 // Bytes in, a []Token table out (docs/02-core-subset.md C2 data model):
 // a token is kind + byte offset + byte length; its text is
-// src[start:start + len]. Positions are offsets plus a line table
-// (`lines[k]` = offset of line k + 1); `pos` turns an offset into
-// line:column on demand. No globals: all state is in a `Lexer` reached
-// through `*mut`, memory comes from the caller's arena.
+// src[start:start + len]. Positions are offsets; the lexer fills the
+// line table of the shared `diag.Diag`, which turns an offset into
+// line:column on demand and holds the first error. No globals: all state
+// is in a `Lexer` reached through `*mut`, memory comes from the caller's
+// arena.
 //
 // Token set and rules follow Klin's lexer (klin lib/lexer.dart) so the
 // stream is identical; scripts/test.sh compares both on the same files.
@@ -14,6 +15,7 @@
 // error (C3, C4), not here.
 module lex
 import arena
+import diag
 
 pub enum Tok: u8 {
     // keywords
@@ -108,23 +110,16 @@ pub struct Token {
     len: i32 // bytes; text = src[start:start + len]
 }
 
-// Error code of a lexical error (outside the errno range of `os`).
-pub const E_LEX: i32 = 1000
-
 pub struct Lexer {
     src: []u8
     toks: []Token // after run: all tokens, the last one is Eof
-    lines: []i32 // lines[k] = offset of the first byte of line k + 1
-    // First error (run returns error(E_LEX)): message = msg + arg + tail.
-    err_pos: i32
-    err_msg: []u8
-    err_arg: []u8
-    err_tail: []u8
+    d: *mut diag.Diag // line table and the first error
 }
 
-pub fn Lexer.new(src: []u8): Lexer {
+pub fn Lexer.new(src: []u8, d: *mut diag.Diag): Lexer {
     let mut l: Lexer
     l.src = src
+    l.d = d
     return l
 }
 
@@ -137,15 +132,15 @@ pub fn alloc_tok(a: *mut arena.Arena, n: i32): ![]Token {
 }
 
 fn fail(l: *mut Lexer, pos: i32, msg: []u8): !i32 {
-    return fail3(l, pos, msg, b"", b"")
+    return error(diag.fail((*l).d, pos, msg))
 }
 
+// msg + arg + tail, e.g. "unexpected character `" + "#" + "`".
 fn fail3(l: *mut Lexer, pos: i32, msg: []u8, arg: []u8, tail: []u8): !i32 {
-    (*l).err_pos = pos
-    (*l).err_msg = msg
-    (*l).err_arg = arg
-    (*l).err_tail = tail
-    return error(E_LEX)
+    let e = diag.fail((*l).d, pos, msg)
+    diag.add((*l).d, arg)
+    diag.add((*l).d, tail)
+    return error(e)
 }
 
 // Byte at i, 0 past the end (0 never continues a token).
@@ -469,25 +464,12 @@ fn char_end(l: *mut Lexer, start: i32): !i32 {
     return i + 1
 }
 
-// Lexes (*l).src into (*l).toks and (*l).lines. error(E_LEX) on the
-// first lexical error (details in err_*), or an arena error (ENOMEM).
+// Lexes (*l).src into (*l).toks and the line table of (*l).d.
+// error(diag.E_DIAG) on the first lexical error (message in (*l).d), or
+// an arena error (ENOMEM).
 pub fn run(l: *mut Lexer, a: *mut arena.Arena): !i32 {
     let s = (*l).src
-    let mut nl = 1
-    for i in 0..<s.len {
-        if s[i] == '\n' {
-            nl += 1
-        }
-    }
-    let mut lines = arena.alloc_i32(a, nl)!
-    let mut k = 1
-    for i in 0..<s.len {
-        if s[i] == '\n' {
-            lines[k] = i + 1
-            k += 1
-        }
-    }
-    (*l).lines = lines
+    (*(*l).d).lines = diag.line_table(a, s)!
     // Every token but Eof covers at least one byte.
     let mut toks = alloc_tok(a, s.len + 1)!
     let mut n = 0
@@ -669,6 +651,12 @@ pub fn run(l: *mut Lexer, a: *mut arena.Arena): !i32 {
             }
             if w == 0 {
                 let m = utf8_len(s, i)
+                if c == '$' {
+                    // Same message as Klin's lexer, plus a note (stage 3).
+                    let e = diag.fail((*l).d, start, b"unexpected character `$`")
+                    diag.set_note((*l).d, b"`$fn` generics and `$name(...)` expansion are not supported by Kliner yet (docs/02-core-subset.md C10)")
+                    return error(e)
+                }
                 return fail3(l, start, b"unexpected character `", s[i:i + m], b"`")
             }
             i += width(kind)
@@ -696,31 +684,6 @@ fn width(k: Tok): i32 {
         }
     }
     return 1
-}
-
-// Offset -> [line, column], both from 1. The column counts UTF-8 code
-// points (bytes that are not 10xxxxxx), like an editor; Klin counts
-// UTF-16 units, which differs only after a character outside the BMP.
-pub fn pos(l: *mut Lexer, off: i32): [2]i32 {
-    let lines = (*l).lines
-    let mut lo = 0
-    let mut hi = lines.len - 1
-    while lo < hi {
-        let mid = (lo + hi + 1) / 2
-        if lines[mid] <= off {
-            lo = mid
-        } else {
-            hi = mid - 1
-        }
-    }
-    let s = (*l).src
-    let mut col = 1
-    for i in lines[lo]..<off {
-        if (s[i] & 0xc0) != 0x80 {
-            col += 1
-        }
-    }
-    return [lo + 1, col]
 }
 
 // Text of token i.

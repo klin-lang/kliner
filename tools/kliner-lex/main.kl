@@ -8,6 +8,7 @@
 // tools/klin-lex.dart (Klin's own lexer) — scripts/test.sh diffs them.
 module main
 import arena
+import diag
 import lex
 import os
 import out
@@ -17,6 +18,7 @@ struct Ctx {
     a: arena.Arena
     o: out.Out
     e: out.Out
+    d: diag.Diag
     lx: lex.Lexer
 }
 
@@ -38,7 +40,7 @@ fn put_text(o: *mut out.Out, t: []u8) {
 }
 
 fn put_pos(c: *mut Ctx, off: i32) {
-    let [line, col] = lex.pos(&(*c).lx, off)
+    let [line, col] = diag.pos(&(*c).d, off)
     (*c).o.dec(cast(i64, line))
     (*c).o.lit(b":")
     (*c).o.dec(cast(i64, col))
@@ -54,20 +56,16 @@ fn run(c: *mut Ctx): !i32 {
         return 2
     }
     let src = os.read_file(&(*c).a, args.arg_z(1))!
-    (*c).lx = lex.Lexer.new(src)
+    (*c).d = diag.Diag.new(args.list[1], src)
+    (*c).lx = lex.Lexer.new(src, &(*c).d)
     let n = lex.run(&(*c).lx, &(*c).a) or {
-        if err != lex.E_LEX {
+        if err != diag.E_DIAG {
             return error(err)
         }
         -1
     }
     if n < 0 {
-        put_pos(c, (*c).lx.err_pos)
-        (*c).o.lit(b": ")
-        (*c).o.lit((*c).lx.err_msg)
-        (*c).o.lit((*c).lx.err_arg)
-        (*c).o.lit((*c).lx.err_tail)
-        (*c).o.nl()
+        diag.write_short(&(*c).d, &(*c).o)
         return 1
     }
     for i in 0..<n {

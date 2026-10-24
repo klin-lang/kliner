@@ -1,0 +1,92 @@
+// statements: let forms, assignments, control flow, match, defer, asm
+fn stmts(xs: []i32, p: Point): !i32 {
+    let a = 1
+    let mut b: i64 = 2
+    c := 3
+    { x, y } = p
+    let { x, y: py } = p
+    let mut { x: qx } = p
+    let [f, _, g] = xs
+    a, b = b, a
+    b = 5
+    b += 1
+    b -= 1
+    b *= 2
+    b /= 2
+    b %= 3
+    b &= 1
+    b |= 2
+    b ^= 3
+    b <<= 1
+    b >>= 1
+    xs[0] = 7
+    p.x = 1
+    *ptr = 2
+    if a < b {
+        b = 0
+    } else if a == b {
+        b = 1
+    } else {
+        b = 2
+    }
+    if ok() {
+    }
+    while b > 0 {
+        b -= 1
+        if b == 3 {
+            continue
+        }
+        break
+    }
+    for i in 0..<10 {
+        use(i)
+    }
+    for i in a..<len(xs) + 1 {
+    }
+    for i := 0; i < 3; i += 1 {
+    }
+    for j = 0; j < 3; j -= 1 {
+    }
+    for ; ; {
+        break
+    }
+    for k := 0; k < 3; k = k + 1 {
+    }
+    defer close(fd)
+    defer {
+        close(fd)
+    }
+    match a {
+        0 {
+            b = 1
+        }
+        1, 2, 3 {
+            b = 2
+        }
+        4..=10 {
+        }
+        != 20 {
+        }
+        > 100 when b != 0 {
+        }
+        <= -1 {
+        }
+        Color.Red {
+        }
+        _ when a == 0 {
+        }
+        else {
+        }
+    }
+    let fee = match a {
+        0 { 0 }
+        1..=5 { 10 }
+        else { 20 }
+    }
+    asm("nop")
+    p.move(1, 2)
+    print(b"x")
+    m.run()
+    return a
+    return
+}

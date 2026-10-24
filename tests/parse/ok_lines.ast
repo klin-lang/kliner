@@ -1,0 +1,37 @@
+unit module=-
+  fn @3:1 name="lines" npos=@3:4 pub=0 async=0 assoc=- ret="i32"
+    param @3:10 name="a" type="i32"
+    param @3:18 name="b" type="i32"
+    block @3:31
+      let @4:9 name="m" mut=0 short=0 type=-
+        name @4:13 v="a"
+      assign @5:5 op=-
+        unary @5:5 op="*"
+          name @5:6 v="ptr"
+        int @5:12 v="3"
+      let @6:9 name="k" mut=0 short=0 type=-
+        name @6:13 v="f"
+      mcall @7:9 name="go"
+        group @7:5
+          name @7:6 v="b"
+      let @8:9 name="s" mut=0 short=0 type=-
+        binary @10:9 op="-"
+          binary @9:9 op="+"
+            name @8:13 v="a"
+            name @9:11 v="b"
+          int @10:11 v="1"
+      let @11:9 name="t" mut=0 short=0 type=-
+        binary @12:5 op="-"
+          call @11:13 mod=- name="log"
+            name @11:17 v="a"
+          int @12:6 v="1"
+      let @13:9 name="u" mut=0 short=0 type=-
+        call @13:13 mod=- name="g"
+          name @14:9 v="a"
+          binary @15:11 op="*"
+            name @15:9 v="b"
+            int @15:13 v="2"
+      return @16:5
+        binary @17:9 op="&&"
+          name @16:12 v="a"
+          name @17:12 v="b"

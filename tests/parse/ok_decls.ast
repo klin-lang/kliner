@@ -1,0 +1,87 @@
+unit module="demo"
+  import @4:1 spec="arena" path=0 alias=-
+  import @5:1 spec="out" path=0 alias="o"
+  import @6:1 spec="../lib/util.kl" path=1 alias=-
+  import @7:1 spec="board/pins" path=1 alias="pins"
+  fn @10:1 name="puts" npos=@10:4 pub=0 async=0 assoc=- ret="i32"
+    attr @9:3 name="cimport" arg="stdio.h"
+    param @10:9 name="s" type="*u8"
+  struct @14:5 name="Pair" npos=@14:12 pub=1
+    attr @12:3 name="packed" arg=-
+    attr @12:11 name="section" arg=".data"
+    attr @13:3 name="used" arg=-
+    field @15:5 name="a" type="i32"
+    field @15:8 name="a2" type="i32"
+    field @16:5 name="b" type="*mut volatile u8"
+    field @17:5 name="c" type="[]Pair"
+    field @18:5 name="d" type="[4]u8"
+    field @19:5 name="e" type="[N * 2 + 1]i64"
+    field @20:5 name="f" type="[o.SIZE]u8"
+    field @21:5 name="g" type="fn(i32,[]u8):!i32"
+    field @22:5 name="h" type="fn():void"
+    field @23:5 name="i" type="!*u8"
+  enum @26:1 name="Color" npos=@26:6 pub=0 base=-
+    variant @27:5 name="Red"
+    variant @28:5 name="Green"
+      int @28:13 v="4"
+    variant @29:5 name="Blue"
+  enum @32:5 name="Small" npos=@32:10 pub=1 base="u8"
+    variant @33:5 name="A"
+      int @33:9 v="0x01"
+    variant @34:5 name="B"
+      binary @34:11 op="<<"
+        int @34:9 v="1"
+        int @34:14 v="3"
+  const @37:1 name="N" npos=@37:7 pub=0 type="i32"
+    int @37:16 v="3"
+  const @38:5 name="NAME" npos=@38:11 pub=1 type="[]u8"
+    bytes @38:24 v="demo"
+  global @39:1 name="counter" npos=@39:9 pub=0 mut=1 type="i64"
+    int @39:24 v="0"
+  global @40:5 name="limit" npos=@40:9 pub=1 mut=0 type="i32"
+    binary @40:24 op="*"
+      name @40:22 v="N"
+      int @40:26 v="4"
+  fn @42:1 name="new" npos=@42:9 pub=0 async=0 assoc="Pair" ret="Pair"
+    param @42:13 name="a" type="i32"
+    block @42:27
+      return @43:5
+        struct-lit @43:12 mod=- type="Pair" named=1 fields="a,b,c,d,e,f,g,h,i"
+          name @43:20 v="a"
+          name @43:26 v="null"
+          array @43:35
+          array @43:42
+            int @43:43 v="1"
+            int @43:46 v="2"
+            int @43:49 v="3"
+            int @43:52 v="4"
+          array @43:59
+          array @43:66
+          name @43:73 v="null"
+          name @43:82 v="null"
+          name @43:91 v="null"
+  fn @46:5 name="sum" npos=@46:18 pub=1 async=0 assoc=- ret="i32"
+    recv @46:9 name="p" mut=0 type="Pair"
+    block @46:29
+      return @47:5
+        get @47:14 name="a"
+          name @47:12 v="p"
+  fn @50:1 name="bump" npos=@50:18 pub=0 async=0 assoc=- ret=-
+    recv @50:9 name="p" mut=1 type="Pair"
+    param @50:23 name="by" type="i32"
+    block @50:32
+      assign @51:7 op="+"
+        get @51:7 name="a"
+          name @51:5 v="p"
+        name @51:12 v="by"
+  fn @54:11 name="later" npos=@54:14 pub=1 async=1 assoc=- ret=-
+    param @54:20 name="x" type="i32"
+    block @54:28
+      await @55:14
+        call @55:5 mod=- name="other"
+          name @55:11 v="x"
+      let @56:9 name="t" mut=0 short=0 type=-
+        await @56:20
+          call @56:13 mod=- name="tick"
+  fn @59:1 name="noop" npos=@59:4 pub=0 async=0 assoc=- ret=-
+    block @59:11

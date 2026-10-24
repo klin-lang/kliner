@@ -6,6 +6,9 @@
 #      and — when a Klin checkout and dart are available — against Klin's
 #      own lexer (tools/klin-lex.dart) on every .kl file of Kliner and of
 #      the Klin checkout.
+#   3. parser (stage 3): tools/kliner-parse against the goldens in
+#      tests/parse and — same conditions — against Klin's own parser
+#      (tools/klin-parse.dart) on the same files.
 #
 #   scripts/test.sh                 # klin from PATH, no Klin comparison
 #   KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
@@ -164,6 +167,71 @@ if build kliner-lex tools/kliner-lex -I "$ROOT/src"; then
         fi
     else
         echo "skip lex = klin (set KLIN_SRC to a Klin checkout, dart on PATH or DART)"
+    fi
+fi
+
+# --- stage 3: parser --------------------------------------------------
+# Goldens: tests/parse/NAME.kl -> NAME.ast (stdout) and, if present,
+# NAME.err (stderr: the `note:` for features Kliner does not support
+# yet). ok_* / err_* stdout was written by Klin's parser
+# (tools/klin-parse.dart); err_* exit 1. div_* are known differences
+# from Klin (README in tests/parse); div_interp* exit 1.
+if build kliner-parse tools/kliner-parse -I "$ROOT/src"; then
+    PARSE=$BIN
+    for f in "$ROOT"/tests/parse/*.kl; do
+        n=$(basename "$f" .kl)
+        rc=0
+        case $n in err_*|div_interp*) rc=1 ;; esac
+        want_err="$TMP/empty"
+        [ -f "$ROOT/tests/parse/$n.err" ] && want_err="$ROOT/tests/parse/$n.err"
+        check "parse $n" $rc "$ROOT/tests/parse/$n.ast" "$want_err" -- "$PARSE" "$f"
+    done
+    printf 'usage: kliner-parse FILE\n' >"$TMP/parseusage.err"
+    check "parse usage" 2 "$TMP/empty" "$TMP/parseusage.err" -- "$PARSE"
+    printf 'error: ENOENT\n' >"$TMP/parseenoent.err"
+    check "parse enoent" 2 "$TMP/empty" "$TMP/parseenoent.err" -- "$PARSE" "$TMP/no/such.kl"
+
+    # Same files through Klin's parser: identical stdout and exit code.
+    # Expected differences, counted but not failures:
+    #  - Kliner rejects string interpolation (exit 1 + note, Klin parses);
+    #  - rt/linux_x86_64/sys.kl: fns without a body in `module sys`
+    #    (Kliner parses, Klin: "expected `{`");
+    #  - div_* goldens (tests/lex, tests/parse).
+    # Files with `$fn` / `$name(...)` fail in both at the same `$`.
+    DART=${DART:-dart}
+    if [ -n "${KLIN_SRC:-}" ] && [ -f "$KLIN_SRC/lib/parser.dart" ] && command -v "$DART" >/dev/null 2>&1; then
+        printf '{"configVersion":2,"packages":[{"name":"klin","rootUri":"file://%s/lib/","packageUri":"./"}]}\n' \
+            "$(cd "$KLIN_SRC" && pwd)" >"$TMP/pkg.json"
+        if "$DART" compile exe --packages="$TMP/pkg.json" "$ROOT/tools/klin-parse.dart" -o "$TMP/klin-parse" >"$TMP/dartp.build" 2>&1; then
+            vs_klin_parse() {
+                label=$1; shift
+                nf=0 bad=0 interp=0 sys=0
+                for f in "$@"; do
+                    case $(basename "$f") in div_*.kl) continue ;; esac
+                    nf=$((nf + 1))
+                    "$TMP/klin-parse" "$f" >"$TMP/d.ast" 2>&1; a=$?
+                    "$PARSE" "$f" >"$TMP/k.ast" 2>/dev/null; b=$?
+                    if [ $a = $b ] && cmp -s "$TMP/d.ast" "$TMP/k.ast"; then continue; fi
+                    if [ $a = 0 ] && [ $b = 1 ] && grep -q ': string interpolation is not supported by Kliner yet$' "$TMP/k.ast"; then
+                        interp=$((interp + 1)); continue
+                    fi
+                    case $f in */rt/linux_x86_64/sys.kl) if [ $b = 0 ]; then sys=$((sys + 1)); continue; fi ;; esac
+                    bad=$((bad + 1))
+                    echo "  differs: $f (exit klin $a, kliner $b)"
+                    diff "$TMP/d.ast" "$TMP/k.ast" | head -6 | sed 's/^/    /'
+                done
+                extra="$interp interpolation"
+                [ $sys != 0 ] && extra="$extra, $sys body-less sys"
+                if [ $bad = 0 ]; then echo "ok   parse = klin: $label ($nf files; expected differences: $extra)"; pass=$((pass + 1));
+                else echo "FAIL parse = klin: $label ($bad of $nf files differ)"; fail=$((fail + 1)); fi
+            }
+            vs_klin_parse "kliner sources" $(find "$ROOT" -name '*.kl' -not -path '*/out/*' | sort)
+            vs_klin_parse "klin checkout" $(find "$KLIN_SRC" -name '*.kl' -not -path '*/out/*' -not -path '*/.dart_tool/*' | sort)
+        else
+            echo "FAIL build klin-parse.dart"; sed 's/^/  /' "$TMP/dartp.build"; fail=$((fail + 1))
+        fi
+    else
+        echo "skip parse = klin (set KLIN_SRC to a Klin checkout, dart on PATH or DART)"
     fi
 fi
 

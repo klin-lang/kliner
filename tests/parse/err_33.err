@@ -1,0 +1,1 @@
+note: `$fn` generics and `$name(...)` expansion are not supported by Kliner yet (docs/02-core-subset.md C10)
