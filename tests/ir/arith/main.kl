@@ -1,0 +1,148 @@
+// IR golden: integer arithmetic at every width (wrapping, signedness,
+// division, shifts, conversions, comparisons).
+module main
+import os
+import out
+
+fn p(o: *mut out.Out, name: []u8, v: i64) {
+    (*o).lit(name)
+    (*o).lit(b" ")
+    (*o).dec(v)
+    (*o).nl()
+}
+
+fn ph(o: *mut out.Out, name: []u8, v: u64) {
+    (*o).lit(name)
+    (*o).lit(b" ")
+    (*o).hex(v)
+    (*o).nl()
+}
+
+fn widths(o: *mut out.Out) {
+    let mut a: u8 = 250
+    a += 10
+    p(o, b"u8 wrap", cast(i64, a))
+    let mut b: i8 = 127
+    b += 1
+    p(o, b"i8 wrap", cast(i64, b))
+    let mut c: u16 = 0
+    c -= 1
+    p(o, b"u16 wrap", cast(i64, c))
+    let mut d: i16 = -32768
+    d -= 1
+    p(o, b"i16 wrap", cast(i64, d))
+    let mut e: i32 = 2147483647
+    e += 1
+    p(o, b"i32 wrap", cast(i64, e))
+    let mut f: u32 = 4000000000
+    f *= 2
+    p(o, b"u32 mul", cast(i64, f))
+    let mut g: u64 = 0
+    g -= 1
+    ph(o, b"u64 max", g)
+    let h: i64 = -9223372036854775807 - 1
+    p(o, b"i64 min", h)
+    let x: u8 = 200
+    let y: u8 = 100
+    let z: u8 = x + y
+    p(o, b"u8 add", cast(i64, z))
+}
+
+fn division(o: *mut out.Out) {
+    let a: i32 = -7
+    let b: i32 = 2
+    p(o, b"-7/2", cast(i64, a / b))
+    p(o, b"-7%2", cast(i64, a % b))
+    p(o, b"7/-2", cast(i64, 7 / (0 - b)))
+    let u: u32 = 4294967295
+    p(o, b"u32/16", cast(i64, u / 16))
+    p(o, b"u32%10", cast(i64, u % 10))
+    let big: u64 = 18446744073709551615
+    ph(o, b"u64/3", big / 3)
+    ph(o, b"u64%7", big % 7)
+    let m: i64 = -100
+    p(o, b"i64/7", m / 7)
+    p(o, b"i64%7", m % 7)
+}
+
+fn shifts(o: *mut out.Out) {
+    let one: u32 = 1
+    p(o, b"1<<31", cast(i64, one << 31))
+    let n: i32 = -16
+    p(o, b"-16>>2", cast(i64, n >> 2))
+    let un: u32 = 4294967280
+    p(o, b"u32>>2", cast(i64, un >> 2))
+    let k: u8 = 129
+    let k2: u8 = k << 1
+    p(o, b"u8<<1", cast(i64, k2))
+    let mut s: i64 = 1
+    for i in 0..<10 {
+        s = s << 3
+    }
+    p(o, b"8^10", s)
+    let sh: u64 = 9223372036854775808
+    ph(o, b"u64>>63", sh >> 63)
+}
+
+fn bits(o: *mut out.Out) {
+    let a: u8 = 0xf0
+    let b: u8 = 0x3c
+    p(o, b"and", cast(i64, a & b))
+    p(o, b"or", cast(i64, a | b))
+    p(o, b"xor", cast(i64, a ^ b))
+    let na: u8 = ~a
+    p(o, b"not u8", cast(i64, na))
+    let c: i32 = 5
+    p(o, b"not i32", cast(i64, ~c))
+    p(o, b"neg", cast(i64, -c))
+}
+
+fn convs(o: *mut out.Out) {
+    let a: i32 = -1
+    p(o, b"i32->u8", cast(i64, cast(u8, a)))
+    p(o, b"i32->u16", cast(i64, cast(u16, a)))
+    p(o, b"i32->u32", cast(i64, cast(u32, a)))
+    ph(o, b"i32->u64", cast(u64, a))
+    let b: u8 = 200
+    p(o, b"u8->i8", cast(i64, cast(i8, b)))
+    let c: i64 = 300
+    p(o, b"i64->u8", cast(i64, cast(u8, c)))
+    p(o, b"i64->i8", cast(i64, cast(i8, c)))
+    let d: u32 = 4294967295
+    p(o, b"u32->i32", cast(i64, cast(i32, d)))
+    p(o, b"u32->i64", cast(i64, d))
+}
+
+fn cmps(o: *mut out.Out) {
+    let a: u32 = 4294967295
+    let b: u32 = 1
+    let mut n = 0
+    if a > b {
+        n += 1
+    }
+    let c: i32 = -1
+    let d: i32 = 1
+    if c < d {
+        n += 10
+    }
+    let e: u64 = 18446744073709551615
+    if e > 5 {
+        n += 100
+    }
+    if c <= -1 && d >= 1 && c != d && !(c == d) {
+        n += 1000
+    }
+    p(o, b"cmps", cast(i64, n))
+}
+
+fn main() {
+    let mut o = out.Out.stdout()
+    widths(&o)
+    division(&o)
+    shifts(&o)
+    bits(&o)
+    convs(&o)
+    cmps(&o)
+    o.flush_quiet()
+    os.exit(0)
+}

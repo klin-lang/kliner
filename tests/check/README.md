@@ -8,7 +8,7 @@ same files are also checked with Klin's checker (`tools/klin-check.dart`)
 and must give the same line. Docs: [docs/04-checker.md](../../docs/04-checker.md).
 
 - `ok_*`, `err_*` — own cases (one error each); goldens written by
-  Klin's checker (main `a66ffbd`).
+  Klin's checker (main `a66ffbd`; updated for `f9f5471`).
 - `mod_N/` — projects with imports (`util/`, `other/`): private
   symbols, wrong module, module globals / consts / structs / enums,
   errors inside an imported module; golden `mod_N.out`.

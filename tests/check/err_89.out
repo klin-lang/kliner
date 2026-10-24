@@ -1,0 +1,1 @@
+3:10: `puts` expects `str`, got `[2]i32`

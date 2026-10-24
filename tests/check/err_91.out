@@ -1,0 +1,1 @@
+7:6: cannot assign through read-only bytes (the binding can be reassigned; copy into a `[N]u8` to modify)

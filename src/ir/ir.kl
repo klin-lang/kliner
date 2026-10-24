@@ -1,0 +1,457 @@
+// module ir — the linear IR (stage 5, docs/05-ir.md): three-address code
+// over virtual registers, explicit widths, no SSA (K9). A function is a
+// range of instructions in Prog.ins; labels are per function and map to
+// instruction indices through Prog.labs. Every local lives in a frame
+// slot; registers are temporaries holding a 64-bit value normalized to
+// the width of the instruction that wrote it. Aggregates (struct, array,
+// slice, !T) live in memory and a register holds their address.
+//
+// ir.kl: the tables, the builder, the layout of types and the dump.
+module ir
+import arena
+import check
+import load
+import out
+import types
+
+pub enum Op: u8 {
+    Nop
+    Const // d = k
+    Slot // d = frame + k
+    Glob // d = globals + k
+    Data // d = data + k
+    FnRef // d = function a as a value
+    Mov // d = a
+    Load // d = *(t *)(a + k)
+    Store // *(t *)(a + k) = b
+    Add // d = a + b, wraps at the width of t (Sub … Shr the same)
+    Sub
+    Mul
+    Div // traps on b == 0
+    Rem
+    And
+    Or
+    Xor
+    Shl // count b as unsigned; >= width: 0
+    Shr // arithmetic for signed t; >= width: 0 or -1
+    Eq // d = a == b ? 1 : 0, operands of type t (Ne … Ge the same)
+    Ne
+    Lt
+    Le
+    Gt
+    Ge
+    Neg // d = -a
+    Not // d = ~a
+    Conv // d = a converted from type c to type t
+    Copy // copy k bytes from b to a
+    Zero // zero k bytes at a
+    Label // a = label
+    Jmp // goto a
+    Br // if a != 0 goto b else goto c
+    Call // d = function a (args[b .. b + c)); d = -1 when unused
+    CallInd // d = fn value in register a (args[b .. b + c))
+    Ret // return a (-1: nothing)
+    Sys // d = syscall(args[b .. b + 7)): nr, then 6 arguments
+    Trap // abort: k = 1 division by zero, 2 missing return, 3 null fn value
+}
+
+// IR types: the integer primitives in types.P order, then ptr.
+pub const I8: u8 = 0
+pub const I16: u8 = 1
+pub const I32: u8 = 2
+pub const I64: u8 = 3
+pub const U8: u8 = 4
+pub const U16: u8 = 5
+pub const U32: u8 = 6
+pub const U64: u8 = 7
+pub const PTR: u8 = 8
+pub const VOID: u8 = 9
+
+// !T in memory: is_err u8 at 0, err i32 at 4, the value at ROK.
+pub const ROK: i64 = 8
+
+pub const E_IR: i32 = 1004
+
+pub struct Ins {
+    op: Op
+    t: u8
+    d: i32
+    a: i32
+    b: i32
+    c: i32
+    k: i64
+}
+
+pub struct Func {
+    name: []u8
+    np: i32 // parameters: registers 0 .. np-1 (the sret pointer first)
+    nr: i32 // registers
+    ret: u8 // VOID or the type of the returned register
+    sret: bool // returns an aggregate through the pointer in r0
+    frame: i64 // bytes of slots
+    start: i32 // instructions [start, end)
+    end: i32
+    lab: i32 // labels: labs[lab + id] = instruction index
+    nl: i32
+    kind: i32 // 0 body, 1 sys.call6 (lowered to Sys), 2 none (cimport)
+}
+
+pub struct Prog {
+    a: *mut arena.Arena
+    ins: []Ins
+    n: i32
+    args: []i32
+    na: i32
+    labs: []i32
+    nlab: i32
+    fns: []Func // checker function index; [nfn] is $init
+    nfn: i32
+    data: []u8
+    nd: i32
+    gsize: i64
+    goff: []i64 // global index -> offset
+    main: i32
+    init: i32
+    // error: message at (ef, etok)
+    ef: i32
+    etok: i32
+    msg: []u8
+    mn: i32
+}
+
+fn alloc_ins(a: *mut arena.Arena, n: i32): ![]Ins {
+    let two: [2]Ins
+    let size = cast(i64, &two[1]) - cast(i64, &two[0])
+    let p = cast(*mut [arena.MAX_LEN]Ins, arena.alloc_addr(a, size * cast(i64, n))!)
+    return (*p)[:n]
+}
+
+fn alloc_fns(a: *mut arena.Arena, n: i32): ![]Func {
+    let two: [2]Func
+    let size = cast(i64, &two[1]) - cast(i64, &two[0])
+    let p = cast(*mut [arena.MAX_LEN]Func, arena.alloc_addr(a, size * cast(i64, n))!)
+    return (*p)[:n]
+}
+
+pub fn Prog.new(a: *mut arena.Arena, nfn: i32, nglob: i32): !Prog {
+    let mut g: Prog
+    g.a = a
+    g.ins = alloc_ins(a, 4096)!
+    g.args = arena.alloc_i32(a, 1024)!
+    g.labs = arena.alloc_i32(a, 1024)!
+    g.fns = alloc_fns(a, nfn + 1)!
+    g.nfn = nfn
+    g.data = arena.alloc_u8(a, 4096)!
+    g.goff = arena.alloc_i64(a, nglob + 1)!
+    g.main = -1
+    g.init = nfn
+    g.ef = -1
+    g.etok = -1
+    g.msg = arena.alloc_u8(a, 512)!
+    return g
+}
+
+// ---- errors ----
+
+pub fn madd(g: *mut Prog, s: []u8) {
+    for i in 0..<s.len {
+        if (*g).mn < (*g).msg.len {
+            (*g).msg[(*g).mn] = s[i]
+            (*g).mn += 1
+        }
+    }
+}
+
+pub fn message(g: *mut Prog): []u8 {
+    return (*g).msg[0:(*g).mn]
+}
+
+// ---- growing tables ----
+
+pub fn emit(g: *mut Prog, ins: Ins): !i32 {
+    if (*g).n == (*g).ins.len {
+        let mut bigger = alloc_ins((*g).a, (*g).n * 2)!
+        for i in 0..<(*g).n {
+            bigger[i] = (*g).ins[i]
+        }
+        (*g).ins = bigger
+    }
+    (*g).ins[(*g).n] = ins
+    (*g).n += 1
+    return (*g).n - 1
+}
+
+fn grow_i32(a: *mut arena.Arena, s: []i32, n: i32): ![]i32 {
+    let mut bigger = arena.alloc_i32(a, s.len * 2)!
+    for i in 0..<n {
+        bigger[i] = s[i]
+    }
+    return bigger
+}
+
+pub fn add_arg(g: *mut Prog, r: i32): !i32 {
+    if (*g).na == (*g).args.len {
+        (*g).args = grow_i32((*g).a, (*g).args, (*g).na)!
+    }
+    (*g).args[(*g).na] = r
+    (*g).na += 1
+    return (*g).na - 1
+}
+
+pub fn add_lab(g: *mut Prog, v: i32): !i32 {
+    if (*g).nlab == (*g).labs.len {
+        (*g).labs = grow_i32((*g).a, (*g).labs, (*g).nlab)!
+    }
+    (*g).labs[(*g).nlab] = v
+    (*g).nlab += 1
+    return (*g).nlab - 1
+}
+
+// Bytes into the data pool, NUL-terminated; the offset.
+pub fn add_data(g: *mut Prog, b: []u8): !i64 {
+    while (*g).nd + b.len + 1 > (*g).data.len {
+        let mut bigger = arena.alloc_u8((*g).a, (*g).data.len * 2)!
+        for i in 0..<(*g).nd {
+            bigger[i] = (*g).data[i]
+        }
+        (*g).data = bigger
+    }
+    let off = (*g).nd
+    for i in 0..<b.len {
+        (*g).data[off + i] = b[i]
+    }
+    (*g).data[off + b.len] = 0
+    (*g).nd = off + b.len + 1
+    // keep 8-byte alignment for the next item
+    while ((*g).nd & 7) != 0 {
+        (*g).nd += 1
+    }
+    return cast(i64, off)
+}
+
+// ---- IR types ----
+
+pub fn tname(t: u8): []u8 {
+    match t {
+        0 { return b"i8" }
+        1 { return b"i16" }
+        2 { return b"i32" }
+        3 { return b"i64" }
+        4 { return b"u8" }
+        5 { return b"u16" }
+        6 { return b"u32" }
+        7 { return b"u64" }
+        8 { return b"ptr" }
+        else { return b"void" }
+    }
+}
+
+// Byte width of an IR type.
+pub fn tsize(t: u8): i64 {
+    match t {
+        0, 4 { return 1 }
+        1, 5 { return 2 }
+        2, 6 { return 4 }
+        else { return 8 }
+    }
+}
+
+pub fn is_signed(t: u8): bool {
+    return t <= 3
+}
+
+// ---- the dump ----
+
+pub fn op_name(op: Op): []u8 {
+    match op {
+        Op.Nop { return b"nop" }
+        Op.Const { return b"const" }
+        Op.Slot { return b"slot" }
+        Op.Glob { return b"glob" }
+        Op.Data { return b"data" }
+        Op.FnRef { return b"fnref" }
+        Op.Mov { return b"mov" }
+        Op.Load { return b"load" }
+        Op.Store { return b"store" }
+        Op.Add { return b"add" }
+        Op.Sub { return b"sub" }
+        Op.Mul { return b"mul" }
+        Op.Div { return b"div" }
+        Op.Rem { return b"rem" }
+        Op.And { return b"and" }
+        Op.Or { return b"or" }
+        Op.Xor { return b"xor" }
+        Op.Shl { return b"shl" }
+        Op.Shr { return b"shr" }
+        Op.Eq { return b"eq" }
+        Op.Ne { return b"ne" }
+        Op.Lt { return b"lt" }
+        Op.Le { return b"le" }
+        Op.Gt { return b"gt" }
+        Op.Ge { return b"ge" }
+        Op.Neg { return b"neg" }
+        Op.Not { return b"not" }
+        Op.Conv { return b"conv" }
+        Op.Copy { return b"copy" }
+        Op.Zero { return b"zero" }
+        Op.Label { return b"label" }
+        Op.Jmp { return b"jmp" }
+        Op.Br { return b"br" }
+        Op.Call { return b"call" }
+        Op.CallInd { return b"callind" }
+        Op.Ret { return b"ret" }
+        Op.Sys { return b"sys" }
+        Op.Trap { return b"trap" }
+    }
+}
+
+fn reg(o: *mut out.Out, r: i32) {
+    (*o).lit(b"r")
+    (*o).dec(cast(i64, r))
+}
+
+fn lab(o: *mut out.Out, l: i32) {
+    (*o).lit(b"L")
+    (*o).dec(cast(i64, l))
+}
+
+fn arglist(g: *mut Prog, o: *mut out.Out, b: i32, n: i32) {
+    (*o).lit(b"(")
+    for i in 0..<n {
+        if i > 0 {
+            (*o).lit(b", ")
+        }
+        reg(o, (*g).args[b + i])
+    }
+    (*o).lit(b")")
+}
+
+fn mem(o: *mut out.Out, a: i32, k: i64) {
+    (*o).lit(b"[")
+    reg(o, a)
+    if k != 0 {
+        (*o).lit(b"+")
+        (*o).dec(k)
+    }
+    (*o).lit(b"]")
+}
+
+pub fn dump_ins(g: *mut Prog, o: *mut out.Out, x: Ins) {
+    if x.op == Op.Label {
+        lab(o, x.a)
+        (*o).lit(b":")
+        (*o).nl()
+        return
+    }
+    (*o).lit(b"    ")
+    if x.d >= 0 {
+        reg(o, x.d)
+        (*o).lit(b" = ")
+    }
+    (*o).lit(op_name(x.op))
+    let k = x.op
+    let typed = k == Op.Const || k == Op.Load || k == Op.Store || k == Op.Conv || k == Op.Mov || (cast(i32, k) >= cast(i32, Op.Add) && cast(i32, k) <= cast(i32, Op.Not))
+    if typed {
+        (*o).lit(b".")
+        (*o).lit(tname(x.t))
+    }
+    if k == Op.Conv {
+        (*o).lit(b".")
+        (*o).lit(tname(cast(u8, x.c)))
+    }
+    if k != Op.Nop && k != Op.Sys && !(k == Op.Ret && x.a < 0) {
+        (*o).lit(b" ")
+    }
+    if k == Op.Const || k == Op.Slot || k == Op.Glob || k == Op.Data || k == Op.Trap {
+        (*o).dec(x.k)
+    } else if k == Op.FnRef {
+        (*o).lit((*g).fns[x.a].name)
+    } else if k == Op.Load {
+        mem(o, x.a, x.k)
+    } else if k == Op.Store {
+        mem(o, x.a, x.k)
+        (*o).lit(b", ")
+        reg(o, x.b)
+    } else if k == Op.Copy {
+        reg(o, x.a)
+        (*o).lit(b", ")
+        reg(o, x.b)
+        (*o).lit(b", ")
+        (*o).dec(x.k)
+    } else if k == Op.Zero {
+        reg(o, x.a)
+        (*o).lit(b", ")
+        (*o).dec(x.k)
+    } else if k == Op.Jmp {
+        lab(o, x.a)
+    } else if k == Op.Br {
+        reg(o, x.a)
+        (*o).lit(b", ")
+        lab(o, x.b)
+        (*o).lit(b", ")
+        lab(o, x.c)
+    } else if k == Op.Call {
+        (*o).lit((*g).fns[x.a].name)
+        arglist(g, o, x.b, x.c)
+    } else if k == Op.CallInd {
+        reg(o, x.a)
+        arglist(g, o, x.b, x.c)
+    } else if k == Op.Sys {
+        arglist(g, o, x.b, 7)
+    } else if k == Op.Ret {
+        if x.a >= 0 {
+            reg(o, x.a)
+        }
+    } else if k == Op.Neg || k == Op.Not || k == Op.Conv || k == Op.Mov {
+        reg(o, x.a)
+    } else if cast(i32, k) >= cast(i32, Op.Add) && cast(i32, k) <= cast(i32, Op.Ge) {
+        reg(o, x.a)
+        (*o).lit(b", ")
+        reg(o, x.b)
+    }
+    (*o).nl()
+}
+
+pub fn dump_fn(g: *mut Prog, o: *mut out.Out, i: i32) {
+    let f = (*g).fns[i]
+    (*o).lit(b"fn ")
+    (*o).lit(f.name)
+    (*o).lit(b"(")
+    for j in 0..<f.np {
+        if j > 0 {
+            (*o).lit(b", ")
+        }
+        reg(o, j)
+    }
+    (*o).lit(b")")
+    if f.sret {
+        (*o).lit(b" sret")
+    }
+    if f.ret != VOID {
+        (*o).lit(b": ")
+        (*o).lit(tname(f.ret))
+    }
+    (*o).lit(b" frame ")
+    (*o).dec(f.frame)
+    (*o).lit(b" regs ")
+    (*o).dec(cast(i64, f.nr))
+    (*o).nl()
+    for j in f.start..<f.end {
+        dump_ins(g, o, (*g).ins[j])
+    }
+    (*o).nl()
+}
+
+pub fn dump(g: *mut Prog, o: *mut out.Out) {
+    (*o).lit(b"globals ")
+    (*o).dec((*g).gsize)
+    (*o).lit(b" data ")
+    (*o).dec(cast(i64, (*g).nd))
+    (*o).nl()
+    (*o).nl()
+    for i in 0..<(*g).nfn + 1 {
+        if (*g).fns[i].kind == 0 && (*g).fns[i].name.len > 0 {
+            dump_fn(g, o, i)
+        }
+    }
+}

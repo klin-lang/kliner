@@ -1,0 +1,15 @@
+// IR golden: main(args) returning the exit code; output written with
+// raw syscalls via os.
+module main
+import os
+
+fn main(args: []str): i32 {
+    let msg = b"argc via main\n"
+    let mut ok = 0
+    ok = os.write_all(1, msg) or { 0 }
+    let mut n: i32 = 0
+    for i in 0..<args.len {
+        n += 1
+    }
+    return 40 + n
+}

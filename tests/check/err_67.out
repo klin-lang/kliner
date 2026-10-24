@@ -1,0 +1,1 @@
+7:5: field `c` needs `err_67.A` to be complete (it contains an array of that struct)

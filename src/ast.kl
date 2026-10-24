@@ -69,7 +69,7 @@ pub enum Nk: u8 {
     // tok = `{`, a = value, extra = list(field tok, target) — a target
     // written without `: expr` is a synthetic Name on the field token
     StructAssign
-    // a = Call / MCall / Await used as a statement; tok = its tok
+    // a = Call / MCall / Await / Propagate (`f()!`) used as a statement; tok = its tok
     ExprStmt
     // tok = `if`, a = cond, b = Block, c = else Block / If or -1
     If

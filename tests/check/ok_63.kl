@@ -1,0 +1,11 @@
+fn main(): i32 {
+    let x = 3
+    let y = 1
+    match x {
+        1 when y > 0 { return 1 }
+        1 { return 2 }
+        1, 1 { return 3 }
+        _ when y > 1 { return 4 }
+        else { return 5 }
+    }
+}

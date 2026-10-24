@@ -1,0 +1,31 @@
+// kliner-ir golden: the dump format (docs/05-ir.md).
+module main
+
+struct P {
+    x: i32
+    y: u8
+}
+
+let mut g: i64 = 5
+
+fn mk(x: i32): P {
+    return P { x: x, y: 2 }
+}
+
+fn f(n: i32): !i32 {
+    if n < 0 {
+        return error(1)
+    }
+    return n * 2
+}
+
+fn main(): i32 {
+    let p = mk(3)
+    let mut s: i32 = 0
+    for i in 0..<p.x {
+        s += i
+    }
+    let v = f(s) or { -1 }
+    g += 1
+    return v + cast(i32, p.y)
+}

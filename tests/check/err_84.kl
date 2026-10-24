@@ -1,0 +1,6 @@
+fn f(): !i32 { return 1 }
+fn g(): i32 {
+    f()!
+    return 0
+}
+fn main(): i32 { return g() }

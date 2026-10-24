@@ -2,4 +2,5 @@ fn main() {
     let s = "abc"
     let b = cstr_u8(s)[0:1]
     let mut c = b
+    c[0] = 1
 }

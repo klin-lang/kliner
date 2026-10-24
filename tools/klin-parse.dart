@@ -174,6 +174,8 @@ void stmt(Stmt s) {
       expr(m.call);
     case AwaitStmt a:
       expr(a.expr);
+    case PropagateStmt p:
+      expr(p.expr);
     case IfStmt i:
       line('if', i.pos);
       kids(() {

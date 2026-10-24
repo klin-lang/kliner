@@ -39,29 +39,24 @@ fn let_value(c: *mut Ck, v: i32): !i32 {
     return t
 }
 
-fn reject_mut_ro(c: *mut Ck, init: i32, ty: i32): !i32 {
-    if !is_u8_slice(c, ty) {
-        return 0
-    }
-    if !is_ro_bytes(c, init)! {
-        return 0
-    }
-    return error(fail(c, tok_of(c, init), b"cannot bind read-only bytes to a mutable slice (copy them into a `[N]u8` to modify)"))
-}
-
-fn reject_ro_assign(c: *mut Ck, target: i32, value: i32): !i32 {
+// D10 (Klin f9f5471): a mutable `[]u8` binding may hold read-only bytes;
+// an assignment to the name updates the flag (Klin's _trackSliceBytes).
+// Fields are not tracked.
+fn track_ro(c: *mut Ck, target: i32, value: i32): !i32 {
     let p = peel(c, target)
     if nk(c, p) != ast.Nk.Name {
         return 0
     }
-    let s = lookup(c, txt(c, nd(c, p).tok))
+    return track_ro_name(c, txt(c, nd(c, p).tok), value)
+}
+
+fn track_ro_name(c: *mut Ck, name: []u8, value: i32): !i32 {
+    let s = lookup(c, name)
     if s < 0 || !(*c).syms[s].is_mut || !is_u8_slice(c, (*c).syms[s].ty) {
         return 0
     }
-    if !is_ro_bytes(c, value)! {
-        return 0
-    }
-    return error(fail(c, tok_of(c, value), b"cannot assign read-only bytes to a mutable slice (copy them into a `[N]u8` to modify)"))
+    (*c).syms[s].rob = is_ro_bytes(c, value)!
+    return 0
 }
 
 fn plain_value(c: *mut Ck, v: i32): bool {
@@ -88,12 +83,12 @@ fn check_let(c: *mut Ck, n: i32): !i32 {
     if x.b >= 0 {
         let it = let_value(c, x.b)!
         if ann >= 0 {
-            let mut ok = expect_assignable(c, ann, it, tok_of(c, x.b))!
+            expect_assignable(c, ann, it, tok_of(c, x.b))!
             ty = ann
         } else {
             ty = default_concrete(c, it, tok_of(c, x.b))!
         }
-        let mut ok2 = materialize(c, x.b, ty, true)!
+        materialize(c, x.b, ty, true)!
         if kind(c, ty) == types.Tk.Array {
             if is_array_value(c, x.b) {
                 abv = true
@@ -106,11 +101,21 @@ fn check_let(c: *mut Ck, n: i32): !i32 {
     } else {
         return error(fail3(c, x.tok, b"variable `", name, b"` requires a type or initializer"))
     }
-    let mut rob = false
-    if x.b >= 0 && is_mut {
-        let mut ok3 = reject_mut_ro(c, x.b, ty)!
+    set_rt(c, n, ty)
+    // `let _ = e` discards (D: Klin f9f5471): evaluated, nothing bound,
+    // may repeat; a `!T` must still be handled.
+    if tab.eq(name, b"_") {
+        if kind(c, ty) == types.Tk.Result {
+            let mut at = x.tok
+            if x.b >= 0 {
+                at = tok_of(c, x.b)
+            }
+            return error(failt(c, at, b"result `", ty, b"` must be handled with `!` or `or`"))
+        }
+        return 0
     }
-    if x.b >= 0 && !is_mut && is_u8_slice(c, ty) {
+    let mut rob = false
+    if x.b >= 0 && is_u8_slice(c, ty) {
         rob = is_ro_bytes(c, x.b)!
     }
     let mut s = sym(c, name, ty, is_mut, x.tok)
@@ -126,7 +131,8 @@ fn check_let_struct(c: *mut Ck, n: i32): !i32 {
     if kind(c, st) != types.Tk.Struct {
         return error(failt(c, tok_of(c, x.a), b"destructuring requires a struct, got `", st, b"`"))
     }
-    let mut ok = materialize(c, x.a, st, true)!
+    materialize(c, x.a, st, true)!
+    set_rt(c, n, st)
     let s = tyof(c, st).a
     let np = cnt(c, x.extra) / 2
     let mut fts = arena_i32(c, np + 1)!
@@ -146,7 +152,10 @@ fn check_let_struct(c: *mut Ck, n: i32): !i32 {
         fts[i] = ft
     }
     for i in 0..<np {
-        ok = define(c, sym(c, txt(c, kid(c, x.extra, i * 2 + 1)), fts[i], x.b == 1, x.tok))!
+        let bn = txt(c, kid(c, x.extra, i * 2 + 1))
+        if !tab.eq(bn, b"_") {
+            define(c, sym(c, bn, fts[i], x.b == 1, x.tok))!
+        }
     }
     return 0
 }
@@ -174,11 +183,12 @@ fn check_let_array(c: *mut Ck, n: i32): !i32 {
     if kind(c, et) == types.Tk.Array {
         return error(fail(c, x.tok, b"cannot destructure a nested array element (bind the array and index it instead)"))
     }
-    let mut ok = materialize(c, x.a, st, true)!
+    materialize(c, x.a, st, true)!
+    set_rt(c, n, st)
     for i in 0..<nn {
         let t = kid(c, x.extra, i)
         if !is_text(c, t, b"_") {
-            ok = define(c, sym(c, txt(c, t), et, x.b == 1, x.tok))!
+            define(c, sym(c, txt(c, t), et, x.b == 1, x.tok))!
         }
     }
     return 0
@@ -203,9 +213,9 @@ fn check_assign(c: *mut Ck, n: i32): !i32 {
         return expect_assignable(c, tt, rt, tok_of(c, x.b))
     }
     let vt = let_value(c, x.b)!
-    let mut ok = expect_assignable(c, tt, vt, tok_of(c, x.b))!
-    ok = materialize(c, x.b, tt, true)!
-    return reject_ro_assign(c, x.a, x.b)
+    expect_assignable(c, tt, vt, tok_of(c, x.b))!
+    materialize(c, x.b, tt, true)!
+    return track_ro(c, x.a, x.b)
 }
 
 fn check_multi_assign(c: *mut Ck, n: i32): !i32 {
@@ -223,9 +233,9 @@ fn check_multi_assign(c: *mut Ck, n: i32): !i32 {
         }
         set_rt(c, t, tt)
         let vt = infer(c, v)!
-        let mut ok = expect_assignable(c, tt, vt, tok_of(c, v))!
-        ok = materialize(c, v, tt, true)!
-        ok = reject_ro_assign(c, t, v)!
+        expect_assignable(c, tt, vt, tok_of(c, v))!
+        materialize(c, v, tt, true)!
+        track_ro(c, t, v)!
     }
     return 0
 }
@@ -237,7 +247,8 @@ fn check_struct_assign(c: *mut Ck, n: i32): !i32 {
     if kind(c, st) != types.Tk.Struct {
         return error(failt(c, tok_of(c, x.a), b"destructuring requires a struct, got `", st, b"`"))
     }
-    let mut ok = materialize(c, x.a, st, true)!
+    materialize(c, x.a, st, true)!
+    set_rt(c, n, st)
     let s = tyof(c, st).a
     for i in 0..<cnt(c, x.extra) / 2 {
         let fname = txt(c, kid(c, x.extra, i * 2))
@@ -254,7 +265,7 @@ fn check_struct_assign(c: *mut Ck, n: i32): !i32 {
         }
         let t = kid(c, x.extra, i * 2 + 1)
         let tt = check_target(c, t, tok_of(c, t))!
-        ok = expect_assignable(c, tt, ft, tok_of(c, t))!
+        expect_assignable(c, tt, ft, tok_of(c, t))!
         set_rt(c, t, tt)
     }
     return 0
@@ -263,11 +274,12 @@ fn check_struct_assign(c: *mut Ck, n: i32): !i32 {
 fn check_match_stmt(c: *mut Ck, n: i32): !i32 {
     let x = nd(c, n)
     let st = check_match_subject(c, x.a)!
-    let mut ok = check_arms_order(c, x.extra)!
-    ok = check_arms_patterns(c, x.extra, st)!
-    ok = check_exhaustive(c, x.extra, st, x.tok, false)!
+    check_arms_order(c, x.extra)!
+    check_arms_patterns(c, x.extra, st)!
+    check_dup_arms(c, x.extra, st)!
+    check_exhaustive(c, x.extra, st, x.tok, false)!
     for i in 0..<cnt(c, x.extra) {
-        ok = check_block(c, nd(c, kid(c, x.extra, i)).c)!
+        check_block(c, nd(c, kid(c, x.extra, i)).c)!
     }
     return 0
 }
@@ -302,7 +314,7 @@ fn check_expr_stmt(c: *mut Ck, n: i32): !i32 {
 
 fn loop_body(c: *mut Ck, b: i32): !i32 {
     (*c).loops += 1
-    let mut ok = check_block(c, b)!
+    check_block(c, b)!
     (*c).loops -= 1
     return 0
 }
@@ -318,6 +330,7 @@ fn check_for_range(c: *mut Ck, n: i32): !i32 {
     }
     let mut ok = materialize(c, x.b, t, true)!
     ok = materialize(c, x.c, t, true)!
+    set_rt(c, n, t)
     ok = push_scope(c)!
     ok = define(c, sym(c, txt(c, x.a), t, true, x.tok)) or {
         pop_scope(c)
@@ -362,7 +375,7 @@ fn bind_forc_target(c: *mut Ck, ntok: i32, v: i32, optok: i32): !i32 {
         return expect_assignable(c, ty, rt, tok_of(c, v))
     }
     let vt = infer(c, v)!
-    let mut ok = expect_assignable(c, ty, vt, tok_of(c, v))!
+    expect_assignable(c, ty, vt, tok_of(c, v))!
     return materialize(c, v, ty, true)
 }
 
@@ -381,7 +394,7 @@ fn check_forc(c: *mut Ck, n: i32): !i32 {
         }
     }
     let mut ok = push_scope(c)!
-    ok = forc_rest(c, x.tok, decl, iname, init, cond, pname, post, x.b, body) or {
+    ok = forc_rest(c, n, x.tok, decl, iname, init, cond, pname, post, x.b, body) or {
         pop_scope(c)
         return error(err)
     }
@@ -389,24 +402,36 @@ fn check_forc(c: *mut Ck, n: i32): !i32 {
     return 0
 }
 
-fn forc_rest(c: *mut Ck, pos: i32, decl: bool, iname: i32, init: i32, cond: i32, pname: i32, post: i32, optok: i32, body: i32): !i32 {
-    let mut ok = 0
+fn forc_rest(c: *mut Ck, n: i32, pos: i32, decl: bool, iname: i32, init: i32, cond: i32, pname: i32, post: i32, optok: i32, body: i32): !i32 {
     if iname >= 0 && init >= 0 {
         if decl {
             let t0 = infer(c, init)!
             let t = default_concrete(c, t0, tok_of(c, init))!
-            ok = materialize(c, init, t, true)!
-            ok = reject_mut_ro(c, init, t)!
-            ok = define(c, sym(c, txt(c, iname), t, true, pos))!
+            materialize(c, init, t, true)!
+            set_rt(c, n, t)
+            let mut s = sym(c, txt(c, iname), t, true, pos)
+            if is_u8_slice(c, t) {
+                s.rob = is_ro_bytes(c, init)!
+            }
+            define(c, s)!
         } else {
-            ok = bind_forc_target(c, iname, init, -1)!
+            bind_forc_target(c, iname, init, -1)!
+            track_ro_name(c, txt(c, iname), init)!
         }
     }
     if cond >= 0 {
-        ok = expect_bool_cond(c, cond)!
+        expect_bool_cond(c, cond)!
     }
     if pname >= 0 && post >= 0 {
-        ok = bind_forc_target(c, pname, post, optok)!
+        bind_forc_target(c, pname, post, optok)!
+        // The post runs after the body: a reseat onto read-only bytes
+        // marks the name; it never clears the initializer's flag.
+        if (optok < 0 || is_text(c, optok, b"=")) && is_ro_bytes(c, post)! {
+            let ps = lookup(c, txt(c, pname))
+            if ps >= 0 && is_u8_slice(c, (*c).syms[ps].ty) {
+                (*c).syms[ps].rob = true
+            }
+        }
     }
     return loop_body(c, body)
 }
@@ -444,11 +469,11 @@ fn check_return(c: *mut Ck, n: i32): !i32 {
         if vt == ret {
             return materialize(c, v, ret, true)
         }
-        let mut ok = expect_assignable(c, elem(c, ret), vt, tok_of(c, v))!
+        expect_assignable(c, elem(c, ret), vt, tok_of(c, v))!
         return materialize(c, v, elem(c, ret), true)
     }
-    let mut ok2 = expect_assignable(c, ret, vt, tok_of(c, v))!
-    ok2 = materialize(c, v, ret, true)!
+    expect_assignable(c, ret, vt, tok_of(c, v))!
+    materialize(c, v, ret, true)!
     if kind(c, ret) == types.Tk.Array && !is_stable_source(c, v) {
         return error(fail(c, tok_of(c, v), b"cannot use this array expression here (bind it to a variable first)"))
     }
@@ -486,15 +511,15 @@ fn check_stmt(c: *mut Ck, n: i32): !i32 {
             return check_expr_stmt(c, n)
         }
         ast.Nk.If {
-            let mut ok = expect_bool_cond(c, x.a)!
-            ok = check_block(c, x.b)!
+            expect_bool_cond(c, x.a)!
+            check_block(c, x.b)!
             if x.c >= 0 {
                 return check_stmt(c, x.c)
             }
             return 0
         }
         ast.Nk.While {
-            let mut ok2 = expect_bool_cond(c, x.a)!
+            expect_bool_cond(c, x.a)!
             return loop_body(c, x.b)
         }
         ast.Nk.ForRange {
@@ -523,7 +548,7 @@ fn check_stmt(c: *mut Ck, n: i32): !i32 {
                 return error(fail(c, x.tok, b"`defer` inside `defer`"))
             }
             (*c).defers += 1
-            let mut ok3 = check_stmt(c, x.a)!
+            check_stmt(c, x.a)!
             (*c).defers -= 1
             return 0
         }

@@ -1,0 +1,2 @@
+enum E: u8 { A, B, C = 0 }
+fn main(): i32 { return 0 }

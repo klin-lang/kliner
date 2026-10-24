@@ -33,6 +33,8 @@ pub struct File {
     mid: i32 // module id (index into Prog.mods)
     rt: []i32 // checker: type id per node (resolvedType), -1 none
     fl: []u8 // checker: flags per node (check.F_*)
+    rf: []i32 // checker: what a Name / Get / Call / MCall resolved to
+              // (check.R_*: index * 8 + kind), -1 local or none
 }
 
 // A top-level declaration: its file, the Decl node and the inner node
@@ -327,7 +329,7 @@ fn parse_file(p: *mut Prog, path: []u8, src: []u8): !i32 {
         (*p).err_file = fi
         return error(E_LOAD)
     }
-    let ok = tab.put(&(*p).parsed, a, path, 0, fi)!
+    tab.put(&(*p).parsed, a, path, 0, fi)!
     return fi
 }
 
@@ -757,13 +759,12 @@ fn is_word(c: u8): bool {
 
 // Splits a `:`-separated list into roots (trimmed, empty parts dropped).
 fn add_path_list(p: *mut Prog, s: []u8): !i32 {
-    let mut ok = 0
     let mut st = 0
     for i in 0..<s.len + 1 {
         if i == s.len || s[i] == ':' {
             let part = trim(s[st:i])
             if part.len > 0 {
-                ok = add_root(p, part)!
+                add_root(p, part)!
             }
             st = i + 1
         }
@@ -804,12 +805,11 @@ pub fn include(p: *mut Prog, dir: []u8): !i32 {
 // loadProject(entry).
 pub fn run(p: *mut Prog, entry_path: []u8): !i32 {
     let a = (*p).a
-    let mut ok = 0
     (*p).cwd = os.getcwd(a)!
-    ok = add_path_list(p, os.getenv(a, b"KLIN_PATH")!)!
+    add_path_list(p, os.getenv(a, b"KLIN_PATH")!)!
     let std = os.getenv(a, b"KLIN_STDLIB")!
     if std.len > 0 {
-        ok = add_root(p, std)!
+        add_root(p, std)!
     }
     let entry_abs = absolute(p, entry_path)!
     let src = read(p, entry_abs)!

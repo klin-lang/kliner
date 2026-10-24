@@ -1,7 +1,8 @@
 # Kliner — checker (stage 4)
 
 Roadmap stage 4 ([01-roadmap.md](01-roadmap.md)). Basis: Klin main
-`a66ffbd` (#359: D20, D21, D22), checked 2026-10-24.
+`f9f5471` (#360: K-B1, K-B2, K-B3, D23, D24, D25; before that #359:
+D20, D21, D22), checked 2026-10-24.
 
 ## What it does
 
@@ -90,40 +91,25 @@ are not extracted, and the four late-typedef cases below.
 | remote imports `github/…` | fetched | load error | — |
 | stdlib lookup | `KLIN_STDLIB`, upward from cwd, next to the binary | `KLIN_STDLIB` only | — |
 
-## Klin bugs (not fixed, repros)
+## Klin bugs (repros)
 
-Found in stage 4 on `a66ffbd` (`klin FILE`):
+Found in stage 4 on `a66ffbd` (`klin FILE`); state on main `f9f5471`
+(#360, checked 2026-10-24):
 
-K-B1 and K-B2 were reported to the Klin bot on 2026-10-24 (C12.2).
-
-- **K-B1** `puts` / extern calls are not type-checked against the C
-  prototype; gcc fails:
-  ```kl
-  fn main() {
-      puts(b"hi")
-  }
-  ```
-  `klin: C compiler error (gcc): … incompatible type for argument 1 of 'puts'`.
-- **K-B2** Misleading message for a struct cycle without arrays:
-  ```kl
-  struct A {
-      b: B
-  }
-  struct B {
-      a: A
-  }
-  fn main() {
-  }
-  ```
-  ``5:5: field `a` needs `b43.A` to be complete (it contains an array of that struct)`` —
-  no array is involved; the real error is a by-value cycle. Kliner
-  prints the same text (port).
-- **K-B3** (from stage 3, still open) diagnostics in an imported module
-  carry the entry file's path; a parse error doubles the path
-  (`main.kl:/abs/m.kl:2:10: …`). Also for the entry file itself: a
-  lexer or parser error prints `r7.kl:/tmp/sp/r7.kl:2:9: expected
-  variable name` (`fn main() {` / `let = 1` / `}`).
-- **K-B4** (found with `str`, 2026-10-24) a zero-initialised `str` is a
+- **K-B1** (fixed in `f9f5471`) `puts` / extern calls were not
+  type-checked against the C prototype; `puts(b"hi")` failed in gcc.
+  Now a checker error (`` `puts` expects `str`, got `[]u8` ``, also
+  for `printf`'s format); ported (`err_61`, `err_85`–`err_89`).
+- **K-B2** (fixed in `f9f5471`) a by-value struct cycle without arrays
+  was reported as ``field `a` needs `A` to be complete (it contains an
+  array of that struct)``. Now ``struct cycle A -> B -> A has infinite
+  size (store one of them behind a pointer)``; the old text stays for
+  cycles through an array. Ported (`err_43`, `err_64`–`err_67`).
+- **K-B3** (fixed in `f9f5471`) diagnostics in an imported module
+  carried the entry file's path, and a lexer/parser error doubled the
+  path (`r7.kl:/tmp/sp/r7.kl:2:9: …`). Now `r7.kl:2:9: …` and
+  `/path/m/m.kl:2:12: …`. (kliner-check prints `L:C:` only.)
+- **K-B4** (still open in `f9f5471`) a zero-initialised `str` is a
   NULL `const char *`; `s.len` (`strlen`), `s[i]` and `cstr_u8(s)` then
   crash (SIGSEGV, exit 139). The checker accepts it:
   ```kl
@@ -136,12 +122,24 @@ K-B1 and K-B2 were reported to the Klin bot on 2026-10-24 (C12.2).
   `t.name.len`) and a global `let mut g: str`. Expected: either `""` as
   the zero value of `str`, or a checker error for a `str` without an
   initializer. Kliner matches Klin's checker (ok).
-- Proposals (behaviour, maybe intended): a constant out-of-range index
-  on a fixed array passes and runs silently
-  (`let a = [1, 2, 3]` / `return a[5]` → exit 0); a duplicate integer
-  `match` arm (`1 { } 1 { }`) is accepted; duplicate enum values
-  (`A = 1`, `B = 1`) are accepted. Kliner matches Klin in all three.
+- **K-B5** (stage 5, still open in `f9f5471`; earlier also called
+  K-B4) narrow-integer arithmetic is not wrapped to its type (`u8`
+  `129 << 1` is 258): repro in
+  [05-ir.md](05-ir.md#differences-from-klin-klin--c--gcc). Marek
+  reports it to the Klin bot.
+- Former proposals, now errors in Klin `f9f5471` and ported:
+  **D23** a constant out-of-range index on a fixed array
+  (``index 5 is out of range for `[3]i32` ``; `err_60`, `err_70`–`err_73`);
+  **D24** an unguarded `match` arm matching the same values as an
+  earlier one (``duplicate `match` pattern …``; `err_62`,
+  `err_77`–`err_81`, `ok_63`); **D25** duplicate enum values
+  (``duplicate enum value 1 (`B` and `A`)``; `err_63`, `err_68`, `err_69`).
 
-Still open from stage 3: `f()!` is not a statement and `let _` cannot
-be repeated (pattern `ok = f()!`, DECIDED C11.4); `let mut x = b"fn"`
-is rejected; load parse errors are reported at the import position.
+Fixed from stage 3 (Klin `f9f5471`, ported): `f()!` is a statement
+(not in `main`: ``postfix operator `!` cannot be used in `main` ``) and
+the `ok = f()!` workaround is gone (C11.4); `let _` can be repeated
+(the value is still evaluated; a `!T` value must be handled);
+`let mut x = b"fn"` is accepted — the binding can be reassigned, but
+writing through it is an error (``cannot assign through read-only
+bytes …``; `err_45`, `str_09`, `str_24`, `str_32`, `err_90`–`err_93`);
+load parse errors are reported in the imported file.

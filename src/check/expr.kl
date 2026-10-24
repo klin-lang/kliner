@@ -459,7 +459,7 @@ fn materialize_rest(c: *mut Ck, e: i32, ty: i32, range: bool): !i32 {
     let x = nd(c, e)
     set_rt(c, e, ty)
     if range {
-        let mut ok = check_coerced_lit(c, e, ty)!
+        check_coerced_lit(c, e, ty)!
     }
     if x.kind == ast.Nk.Unary {
         let o = txt(c, x.tok)
@@ -474,7 +474,7 @@ fn materialize_rest(c: *mut Ck, e: i32, ty: i32, range: bool): !i32 {
         if cmp_op(o) || logical_op(o) {
             return 0
         }
-        let mut ok = materialize(c, x.a, ty, range)!
+        materialize(c, x.a, ty, range)!
         return materialize(c, x.b, ty, range)
     }
     if x.kind == ast.Nk.Group {
@@ -484,13 +484,13 @@ fn materialize_rest(c: *mut Ck, e: i32, ty: i32, range: bool): !i32 {
         let rt = get_rt(c, x.a)
         if rt >= 0 && kind(c, rt) == types.Tk.Result && type_open(c, elem(c, rt)) {
             let r = mk_result(c, ty)!
-            let mut ok = materialize(c, x.a, r, range)!
+            materialize(c, x.a, r, range)!
         }
         let fv = nd(c, x.b).a
         if fv >= 0 {
             let ft = get_rt(c, fv)
             if ft < 0 || type_open(c, ft) {
-                let mut ok2 = materialize(c, fv, ty, range)!
+                materialize(c, fv, ty, range)!
             }
         }
         return 0
@@ -503,17 +503,17 @@ fn materialize_rest(c: *mut Ck, e: i32, ty: i32, range: bool): !i32 {
         for i in 0..<n {
             let el = kid(c, x.extra, i)
             let it = infer(c, el)!
-            let mut ok = expect_assignable(c, elem(c, ty), it, tok_of(c, el))!
-            ok = materialize(c, el, elem(c, ty), range)!
+            expect_assignable(c, elem(c, ty), it, tok_of(c, el))!
+            materialize(c, el, elem(c, ty), range)!
         }
         return 0
     }
     if x.kind == ast.Nk.MatchE {
-        let mut ok = reject_zero_choice(c, b"match", ty, x.tok)!
+        reject_zero_choice(c, b"match", ty, x.tok)!
         let n = cnt(c, x.extra)
         if kind(c, ty) == types.Tk.Array && !contains_untyped(c, ty) {
             for i in 0..<n {
-                ok = require_stable(c, nd(c, kid(c, x.extra, i)).c)!
+                require_stable(c, nd(c, kid(c, x.extra, i)).c)!
             }
         }
         for i in 0..<n {
@@ -521,12 +521,12 @@ fn materialize_rest(c: *mut Ck, e: i32, ty: i32, range: bool): !i32 {
             if kind(c, ty) == types.Tk.Result {
                 let bt = get_rt(c, body)
                 if nk(c, peel(c, body)) == ast.Nk.ErrorE || (bt >= 0 && kind(c, bt) == types.Tk.Result) {
-                    ok = materialize(c, body, ty, range)!
+                    materialize(c, body, ty, range)!
                 } else {
-                    ok = materialize(c, body, elem(c, ty), range)!
+                    materialize(c, body, elem(c, ty), range)!
                 }
             } else {
-                ok = materialize(c, body, ty, range)!
+                materialize(c, body, ty, range)!
             }
         }
         return 0
@@ -594,6 +594,7 @@ fn module_global(c: *mut Ck, g: i32): !i32 {
         return error(e)
     }
     set_fl(c, g, F_MODG)
+    set_rf(c, g, gi, R_GLOBAL)
     return gi
 }
 
@@ -764,6 +765,7 @@ fn try_module_value(c: *mut Ck, g: i32): !i32 {
             return error(priv2(c, x.tok, b"constant `", q, name))
         }
         set_fl(c, g, F_MODV)
+        set_rf(c, g, k, R_CONST)
         return (*c).const_ty[k]
     }
     let gi = tab.get(&(*c).globals, name, m)
@@ -772,6 +774,7 @@ fn try_module_value(c: *mut Ck, g: i32): !i32 {
             return error(priv2(c, x.tok, b"global `", q, name))
         }
         set_fl(c, g, F_MODG)
+        set_rf(c, g, gi, R_GLOBAL)
         return (*c).glob_ty[gi]
     }
     let fi = tab.get(&(*c).funcs, name, m)
@@ -780,6 +783,7 @@ fn try_module_value(c: *mut Ck, g: i32): !i32 {
             return error(priv2(c, x.tok, b"function `", q, name))
         }
         set_fl(c, g, F_MODV)
+        set_rf(c, g, fi, R_FN)
         return fn_sig_type(c, fi)
     }
     let e = fail3(c, x.tok, b"unknown name `", q, b".")
@@ -861,8 +865,8 @@ fn infer0(c: *mut Ck, e: i32): !i32 {
         }
         ast.Nk.ErrorE {
             let ct = infer(c, x.a)!
-            let mut ok = expect_assignable(c, types.I32, ct, tok_of(c, x.a))!
-            ok = materialize(c, x.a, types.I32, true)!
+            expect_assignable(c, types.I32, ct, tok_of(c, x.a))!
+            materialize(c, x.a, types.I32, true)!
             if kind(c, (*c).ret) == types.Tk.Result {
                 return (*c).ret
             }
@@ -875,6 +879,10 @@ fn infer0(c: *mut Ck, e: i32): !i32 {
             }
             if kind(c, (*c).ret) != types.Tk.Result {
                 return error(fail(c, x.tok, b"postfix operator `!` requires a function returning `!T`"))
+            }
+            // `main` is C `int` even when declared `!T` (Klin f9f5471).
+            if tab.eq(fn_name(c, (*c).cfn), b"main") {
+                return error(fail(c, x.tok, b"postfix operator `!` cannot be used in `main` (`main` is emitted as C `int`)"))
             }
             return elem(c, rt)
         }
@@ -914,14 +922,17 @@ fn infer_name(c: *mut Ck, e: i32): !i32 {
     }
     let g = current_global(c, name)
     if g >= 0 {
+        set_rf(c, e, g, R_GLOBAL)
         return (*c).glob_ty[g]
     }
     let k = tab.get(&(*c).consts, name, (*c).cm)
     if k >= 0 {
+        set_rf(c, e, k, R_CONST)
         return (*c).const_ty[k]
     }
     let fi = fn_for_name(c, name)
     if fi >= 0 {
+        set_rf(c, e, fi, R_FN)
         return fn_sig_type(c, fi)
     }
     return error(fail3(c, x.tok, b"unknown variable `", name, b"`"))
@@ -964,23 +975,52 @@ fn infer_get(c: *mut Ck, e: i32): !i32 {
     return sfield_ty(c, s, j)
 }
 
+// D23 (Klin f9f5471, _checkFixedArrayConstIndex): a constant index of
+// `[N]T` must be in 0..<N. Runtime indexes stay unchecked (D15).
+fn const_index(c: *mut Ck, at: i32, ix: i32, it: i32): !i32 {
+    if !is_int_const_expr(c, ix) {
+        return 0
+    }
+    let v = eval(c, ix, it) or {
+        if err != E_NOTCONST {
+            return error(err)
+        }
+        return 0
+    }
+    let len = tyof(c, at).n
+    if v.neg || v.huge || v.hi != 0 || v.lo >= cast(u64, len) {
+        let e = fail(c, tok_of(c, ix), b"index ")
+        mbig(c, v)
+        madd(c, b" is out of range for `[")
+        mdec(c, len)
+        madd(c, b"]")
+        addt(c, elem(c, at))
+        madd(c, b"`")
+        return error(e)
+    }
+    return 0
+}
+
 fn infer_index(c: *mut Ck, e: i32): !i32 {
     let x = nd(c, e)
     let mut ot = infer(c, x.a)!
     if kind(c, ot) == types.Tk.Array && contains_untyped(c, ot) {
         let conc = default_concrete(c, ot, tok_of(c, x.a))!
-        let mut ok = materialize(c, x.a, conc, true)!
+        materialize(c, x.a, conc, true)!
         ot = conc
     }
     let it0 = infer(c, x.b)!
     let it = default_concrete(c, it0, tok_of(c, x.b))!
     if kind(c, it) == types.Tk.Enum {
-        let mut ok2 = check_enum_index(c, it, ot, tok_of(c, x.b))!
+        check_enum_index(c, it, ot, tok_of(c, x.b))!
     } else if !is_int(c, it) {
         return error(fail(c, tok_of(c, x.b), b"index requires an integer or enum type"))
     }
-    let mut ok3 = materialize(c, x.b, it, true)!
+    materialize(c, x.b, it, true)!
     let k = kind(c, ot)
+    if k == types.Tk.Array && is_int(c, it) {
+        const_index(c, ot, x.b, it)!
+    }
     if k == types.Tk.Array || k == types.Tk.Slice {
         return elem(c, ot)
     }
@@ -1011,7 +1051,7 @@ fn infer_slice(c: *mut Ck, e: i32): !i32 {
             }
             return error(fail(c, x.tok, b"a subslice requires an array l-value, not a literal or temporary expression"))
         }
-        let mut ok = require_slice_elem(c, elem(c, src), x.tok)!
+        require_slice_elem(c, elem(c, src), x.tok)!
         el = elem(c, src)
     } else if kind(c, src) == types.Tk.Slice {
         el = elem(c, src)
@@ -1021,10 +1061,10 @@ fn infer_slice(c: *mut Ck, e: i32): !i32 {
         return error(failt(c, x.tok, b"a slice range requires an array or slice, got `", src, b"`"))
     }
     if x.b >= 0 {
-        let mut ok2 = slice_bound(c, x.b, src)!
+        slice_bound(c, x.b, src)!
     }
     if x.c >= 0 {
-        let mut ok3 = slice_bound(c, x.c, src)!
+        slice_bound(c, x.c, src)!
     }
     return mk_slice(c, el)
 }
@@ -1033,7 +1073,7 @@ fn slice_bound(c: *mut Ck, b: i32, indexed: i32): !i32 {
     let t0 = infer(c, b)!
     let it = default_concrete(c, t0, tok_of(c, b))!
     if kind(c, it) == types.Tk.Enum {
-        let mut ok = check_enum_index(c, it, indexed, tok_of(c, b))!
+        check_enum_index(c, it, indexed, tok_of(c, b))!
     } else if !is_int(c, it) {
         return error(fail(c, tok_of(c, b), b"slice bound requires an integer or enum type"))
     }
@@ -1070,8 +1110,8 @@ fn infer_array(c: *mut Ck, e: i32): !i32 {
     for i in 0..<n {
         let el = kid(c, x.extra, i)
         let it = infer(c, el)!
-        let mut ok = expect_assignable(c, et, it, tok_of(c, el))!
-        ok = materialize(c, el, et, true)!
+        expect_assignable(c, et, it, tok_of(c, el))!
+        materialize(c, el, et, true)!
     }
     return mk_array(c, et, cast(i64, n))
 }
@@ -1093,7 +1133,7 @@ fn infer_cast(c: *mut Ck, e: i32): !i32 {
         if !is_int(c, conc) {
             return error(fail(c, x.tok, b"cast to enum requires an integer"))
         }
-        let mut ok = materialize(c, x.b, conc, true)!
+        materialize(c, x.b, conc, true)!
         return target
     }
     if is_int(c, target) && sk == types.Tk.Enum {
@@ -1107,7 +1147,7 @@ fn infer_cast(c: *mut Ck, e: i32): !i32 {
     }
     if is_num(c, target) {
         if sk == types.Tk.UInt {
-            let mut ok2 = materialize(c, x.b, target, false)!
+            materialize(c, x.b, target, false)!
             return target
         }
         if is_num(c, src) {
@@ -1163,7 +1203,7 @@ fn infer_struct_lit(c: *mut Ck, e: i32): !i32 {
             if v < 0 {
                 return error(fail3(c, x.tok, b"missing field `", fname, b"` in literal"))
             }
-            let mut ok = lit_value_field(c, v, sfield_ty(c, s, j))!
+            lit_value_field(c, v, sfield_ty(c, s, j))!
         }
     } else {
         let n = cnt(c, x.extra)
@@ -1174,7 +1214,7 @@ fn infer_struct_lit(c: *mut Ck, e: i32): !i32 {
             return error(e3)
         }
         for j in 0..<n {
-            let mut ok2 = lit_value_field(c, kid(c, x.extra, j), sfield_ty(c, s, j))!
+            lit_value_field(c, kid(c, x.extra, j), sfield_ty(c, s, j))!
         }
     }
     return struct_ty(c, s)
@@ -1198,8 +1238,8 @@ fn named_distinct(c: *mut Ck, l: i32, np: i32): i32 {
 
 fn lit_value_field(c: *mut Ck, v: i32, ft: i32): !i32 {
     let vt = infer(c, v)!
-    let mut ok = expect_assignable(c, ft, vt, tok_of(c, v))!
-    ok = materialize(c, v, ft, true)!
+    expect_assignable(c, ft, vt, tok_of(c, v))!
+    materialize(c, v, ft, true)!
     if kind(c, ft) == types.Tk.Array && !is_stable_source(c, v) {
         return error(fail(c, tok_of(c, v), b"cannot use this array expression here (bind it to a variable first)"))
     }
@@ -1213,7 +1253,7 @@ fn infer_or(c: *mut Ck, e: i32): !i32 {
         return error(fail(c, x.tok, b"left side of `or` must have type `!T`"))
     }
     let fb = nd(c, x.b)
-    let mut ok = push_scope(c)!
+    push_scope(c)!
     let t = or_body(c, x.a, rt, x.b) or {
         pop_scope(c)
         return error(err)
@@ -1224,9 +1264,9 @@ fn infer_or(c: *mut Ck, e: i32): !i32 {
 
 fn or_body(c: *mut Ck, res: i32, rt: i32, fbn: i32): !i32 {
     let fb = nd(c, fbn)
-    let mut ok = define(c, sym(c, b"err", types.I32, false, fb.tok))!
+    define(c, sym(c, b"err", types.I32, false, fb.tok))!
     for i in 0..<cnt(c, fb.extra) {
-        ok = check_stmt(c, kid(c, fb.extra, i))!
+        check_stmt(c, kid(c, fb.extra, i))!
     }
     let okt = elem(c, rt)
     if fb.a < 0 {
@@ -1235,7 +1275,7 @@ fn or_body(c: *mut Ck, res: i32, rt: i32, fbn: i32): !i32 {
         }
         if !type_open(c, okt) {
             let r = mk_result(c, okt)!
-            ok = materialize(c, res, r, true)!
+            materialize(c, res, r, true)!
         }
         return okt
     }
@@ -1244,12 +1284,12 @@ fn or_body(c: *mut Ck, res: i32, rt: i32, fbn: i32): !i32 {
     if type_open(c, okt) || type_open(c, ft) {
         unified = unify_match(c, okt, ft, tok_of(c, fb.a))!
     } else {
-        ok = expect_assignable(c, okt, ft, tok_of(c, fb.a))!
+        expect_assignable(c, okt, ft, tok_of(c, fb.a))!
     }
     if !type_open(c, unified) {
         let r2 = mk_result(c, unified)!
-        ok = materialize(c, res, r2, true)!
-        ok = materialize(c, fb.a, unified, true)!
+        materialize(c, res, r2, true)!
+        materialize(c, fb.a, unified, true)!
     }
     return unified
 }
@@ -1288,7 +1328,7 @@ fn infer_unary(c: *mut Ck, e: i32): !i32 {
         if !is_int(c, conc) {
             return error(failt(c, x.tok, b"operator `~` requires an integer type, got `", conc, b"`"))
         }
-        let mut ok = materialize(c, x.a, conc, true)!
+        materialize(c, x.a, conc, true)!
         return conc
     }
     if !tab.eq(o, b"-") {
@@ -1305,7 +1345,7 @@ fn infer_unary(c: *mut Ck, e: i32): !i32 {
     if is_uns(c, conc) {
         return error(failt(c, x.tok, b"operator `-` is not allowed for unsigned type `", conc, b"`"))
     }
-    let mut ok2 = materialize(c, x.a, conc, true)!
+    materialize(c, x.a, conc, true)!
     return conc
 }
 
@@ -1318,10 +1358,10 @@ fn is_mut_place(c: *mut Ck, e: i32): !bool {
         let name = txt(c, x.tok)
         let s = lookup(c, name)
         if s >= 0 {
-            return (*c).syms[s].is_mut
+            return (*c).syms[s].is_mut && !(*c).syms[s].rob
         }
         let g = current_global(c, name)
-        return g >= 0 && glob_mut(c, g)
+        return g >= 0 && glob_mut(c, g) && (*c).glob_rob[g] == 0
     }
     if x.kind == ast.Nk.Get {
         let obj = peel(c, x.a)
@@ -1414,6 +1454,8 @@ fn require_mut_place(c: *mut Ck, e: i32, pos: i32, vmsg: []u8, emsg: []u8): !i32
     return error(fail(c, pos, emsg))
 }
 
+const RO_WRITE: []u8 = b"cannot assign through read-only bytes (the binding can be reassigned; copy into a `[N]u8` to modify)"
+
 // Klin's _requireMutableSlicePlace.
 fn require_mut_slice(c: *mut Ck, e: i32, pos: i32): !i32 {
     let msg = b"cannot assign through an immutable slice"
@@ -1438,12 +1480,18 @@ fn require_mut_slice(c: *mut Ck, e: i32, pos: i32): !i32 {
                 if !glob_mut(c, g) {
                     return error(fail(c, pos, msg))
                 }
+                if (*c).glob_rob[g] == 1 {
+                    return error(fail(c, pos, RO_WRITE))
+                }
                 return 0
             }
             return error(fail3(c, pos, b"unknown variable `", name, b"`"))
         }
         if !(*c).syms[s].is_mut {
             return error(fail(c, pos, msg))
+        }
+        if (*c).syms[s].rob {
+            return error(fail(c, pos, RO_WRITE))
         }
         return 0
     }
@@ -1469,6 +1517,7 @@ fn check_target(c: *mut Ck, t: i32, pos: i32): !i32 {
                 if !glob_mut(c, g) {
                     return error(assign_immut(c, pos, name))
                 }
+                set_rf(c, p, g, R_GLOBAL)
                 return (*c).glob_ty[g]
             }
             if tab.get(&(*c).consts, name, (*c).cm) >= 0 {
@@ -1510,7 +1559,7 @@ fn check_target(c: *mut Ck, t: i32, pos: i32): !i32 {
         if ot == types.STR {
             return error(fail3(c, pos, b"`str` has no field `", txt(c, x.tok), b"`"))
         }
-        let mut ok = require_mut_place(c, x.a, pos, b"cannot assign to a field of an immutable variable", b"cannot assign to a field of an immutable expression")!
+        require_mut_place(c, x.a, pos, b"cannot assign to a field of an immutable variable", b"cannot assign to a field of an immutable expression")!
         return infer(c, p)
     }
     if x.kind == ast.Nk.Unary && tab.eq(txt(c, x.tok), b"*") {
@@ -1536,11 +1585,11 @@ fn check_target(c: *mut Ck, t: i32, pos: i32): !i32 {
             if place_is_const(c, root) {
                 return error(fail(c, pos, b"cannot assign through a constant"))
             }
-            let mut ok2 = require_mut_slice(c, x.a, pos)!
+            require_mut_slice(c, x.a, pos)!
             return infer(c, p)
         }
         let ty = infer(c, p)!
-        let mut ok3 = require_mut_place(c, x.a, pos, b"cannot assign to an immutable array", b"cannot assign through an immutable expression")!
+        require_mut_place(c, x.a, pos, b"cannot assign to an immutable array", b"cannot assign through an immutable expression")!
         return ty
     }
     return error(fail(c, pos, b"invalid assignment target"))
@@ -1566,7 +1615,7 @@ fn args_count_fail(c: *mut Ck, pos: i32, s1: []u8, name: []u8, want: i32, got: i
 
 fn check_arg(c: *mut Ck, arg: i32, want: i32): !i32 {
     let at = infer(c, arg)!
-    let mut ok = expect_assignable(c, want, at, tok_of(c, arg))!
+    expect_assignable(c, want, at, tok_of(c, arg))!
     return materialize(c, arg, want, true)
 }
 
@@ -1579,7 +1628,7 @@ fn fn_type_call(c: *mut Ck, ft: i32, callee: []u8, args: i32, pos: i32): !i32 {
         return error(args_count_fail(c, pos, b"function `", callee, np, n))
     }
     for i in 0..<n {
-        let mut ok = check_arg(c, kid(c, args, i), types.param(&(*c).t, ft, i))!
+        check_arg(c, kid(c, args, i), types.param(&(*c).t, ft, i))!
     }
     return y.a
 }
@@ -1622,6 +1671,7 @@ fn check_call(c: *mut Ck, e: i32): !i32 {
                 madd(c, b"` variable)")
                 return error(e3)
             }
+            set_rf(c, e, g, R_GLOBAL)
             return fn_type_call(c, gt, callee, x.extra, pos)
         }
         if x.a >= 0 {
@@ -1660,14 +1710,44 @@ fn check_call(c: *mut Ck, e: i32): !i32 {
             return mk_slice(c, types.U8)
         }
         if tab.eq(callee, b"puts") || tab.eq(callee, b"printf") {
-            for i in 0..<cnt(c, x.extra) {
+            // K-B1 (Klin f9f5471): `puts` takes exactly one `str` and
+            // `printf`'s format is a `str`; `b"..."` is `[]u8` (D10).
+            let na = cnt(c, x.extra)
+            if tab.eq(callee, b"puts") {
+                if na != 1 {
+                    let e8 = fail(c, pos, b"`puts` expects 1 argument of type `str`, got ")
+                    mdec(c, cast(i64, na))
+                    return error(e8)
+                }
+                let pa = kid(c, x.extra, 0)
+                let pt = infer(c, pa)!
+                if pt != types.STR {
+                    let e9 = fail(c, tok_of(c, pa), b"`puts` expects `str`, got `")
+                    addm(c, pt)
+                    madd(c, b"`")
+                    return error(e9)
+                }
+                return types.I32
+            }
+            if na == 0 {
+                return error(fail(c, pos, b"`printf` expects a `str` format string"))
+            }
+            let fa = kid(c, x.extra, 0)
+            let ft = infer(c, fa)!
+            if ft != types.STR {
+                let e10 = fail(c, tok_of(c, fa), b"`printf` expects a `str` format, got `")
+                addm(c, ft)
+                madd(c, b"`")
+                return error(e10)
+            }
+            for i in 1..<na {
                 let arg = kid(c, x.extra, i)
                 let ty = infer(c, arg)!
                 if contains_untyped(c, ty) {
                     let conc = default_concrete(c, ty, tok_of(c, arg))!
-                    let mut ok = materialize(c, arg, conc, true)!
+                    materialize(c, arg, conc, true)!
                 } else if is_int(c, ty) && is_int_const_expr(c, arg) {
-                    let mut ok2 = materialize(c, arg, ty, true)!
+                    materialize(c, arg, ty, true)!
                 }
             }
             return types.I32
@@ -1686,13 +1766,14 @@ fn check_call(c: *mut Ck, e: i32): !i32 {
         madd(c, b"` is private")
         return error(e7)
     }
+    set_rf(c, e, fi, R_FN)
     let np = fn_np(c, fi)
     let n = cnt(c, x.extra)
     if n != np {
         return error(args_count_fail(c, pos, b"function `", callee, np, n))
     }
     for i in 0..<n {
-        let mut ok3 = check_arg(c, kid(c, x.extra, i), fn_pty(c, fi, i))!
+        check_arg(c, kid(c, x.extra, i), fn_pty(c, fi, i))!
     }
     return (*c).fn_ret[fi]
 }
@@ -1728,6 +1809,7 @@ fn try_assoc(c: *mut Ck, e: i32): !i32 {
         madd(c, b"` is private")
         return error(e2)
     }
+    set_rf(c, e, fi, R_FN)
     let np = fn_np(c, fi)
     let n = cnt(c, x.extra)
     if n != np {
@@ -1796,15 +1878,16 @@ fn check_mcall(c: *mut Ck, e: i32): !i32 {
         return error(e4)
     }
     if fn_mut_recv(c, mi) {
-        let mut ok = require_mut_place(c, x.a, tok_of(c, x.a), b"cannot call a mutating method on an immutable variable", b"mutating method requires a mutable variable")!
+        require_mut_place(c, x.a, tok_of(c, x.a), b"cannot call a mutating method on an immutable variable", b"mutating method requires a mutable variable")!
     }
+    set_rf(c, e, mi, R_FN)
     let np = fn_np(c, mi)
     let n = cnt(c, x.extra)
     if n != np {
         return error(args_count_fail(c, x.tok, b"method `", name, np, n))
     }
     for i in 0..<n {
-        let mut ok2 = check_arg(c, kid(c, x.extra, i), fn_pty(c, mi, i))!
+        check_arg(c, kid(c, x.extra, i), fn_pty(c, mi, i))!
     }
     return (*c).fn_ret[mi]
 }
@@ -1825,7 +1908,8 @@ fn check_match_subject(c: *mut Ck, s: i32): !i32 {
     if kind(c, t) != types.Tk.Enum && !is_int(c, t) {
         return error(failt(c, tok_of(c, s), b"`match` requires an integer or enum subject, got `", t, b"`"))
     }
-    let mut ok = materialize(c, s, t, true)!
+    materialize(c, s, t, true)!
+    set_rt(c, s, t)
     return t
 }
 
@@ -1844,7 +1928,7 @@ fn check_pattern(c: *mut Ck, pat: i32, st: i32): !i32 {
     let x = nd(c, pat)
     if x.kind == ast.Nk.PatLit {
         for i in 0..<cnt(c, x.extra) {
-            let mut ok = check_arg(c, kid(c, x.extra, i), st)!
+            check_arg(c, kid(c, x.extra, i), st)!
         }
         return 0
     }
@@ -1854,9 +1938,9 @@ fn check_pattern(c: *mut Ck, pat: i32, st: i32): !i32 {
         }
         let a = infer(c, x.a)!
         let b = infer(c, x.b)!
-        let mut ok2 = expect_assignable(c, st, a, tok_of(c, x.a))!
-        ok2 = expect_assignable(c, st, b, tok_of(c, x.b))!
-        ok2 = materialize(c, x.a, st, true)!
+        expect_assignable(c, st, a, tok_of(c, x.a))!
+        expect_assignable(c, st, b, tok_of(c, x.b))!
+        materialize(c, x.a, st, true)!
         return materialize(c, x.b, st, true)
     }
     if x.kind == ast.Nk.PatRel {
@@ -1872,10 +1956,148 @@ fn check_arms_patterns(c: *mut Ck, arms: i32, st: i32): !i32 {
     for i in 0..<cnt(c, arms) {
         let arm = nd(c, kid(c, arms, i))
         if nk(c, arm.a) != ast.Nk.PatElse {
-            let mut ok = check_pattern(c, arm.a, st)!
+            check_pattern(c, arm.a, st)!
         }
         if arm.b >= 0 {
-            let mut ok2 = expect_bool_cond(c, arm.b)!
+            expect_bool_cond(c, arm.b)!
+        }
+    }
+    return 0
+}
+
+// A match value's key for D24: an enum variant name or an integer.
+struct Vk {
+    ok: bool
+    b: Big
+    s: []u8
+}
+
+fn int_key(c: *mut Ck, e: i32, st: i32): !Vk {
+    let none = Vk{ok: false, b: big_u(0), s: b""}
+    if !is_int(c, st) || !is_int_const_expr(c, e) {
+        return none
+    }
+    let v = eval(c, e, st) or {
+        if err != E_NOTCONST {
+            return error(err)
+        }
+        return none
+    }
+    return Vk{ok: true, b: v, s: b""}
+}
+
+// Klin's _matchValueKey.
+fn value_key(c: *mut Ck, e: i32, st: i32): !Vk {
+    if kind(c, st) == types.Tk.Enum {
+        let v = peel(c, e)
+        if nk(c, v) == ast.Nk.Get && has_fl(c, v, F_ENUMC) && get_rt(c, v) == st {
+            return Vk{ok: true, b: big_u(0), s: txt(c, nd(c, v).tok)}
+        }
+        return Vk{ok: false, b: big_u(0), s: b""}
+    }
+    return int_key(c, e, st)
+}
+
+fn vk_eq(a: Vk, b: Vk): bool {
+    return a.b.neg == b.b.neg && a.b.hi == b.b.hi && a.b.lo == b.b.lo && tab.eq(a.s, b.s)
+}
+
+// Whether pattern p has a key (Klin's _matchPatternKey is non-null).
+fn pat_keyed(c: *mut Ck, p: i32, st: i32): !bool {
+    let x = nd(c, p)
+    if x.kind == ast.Nk.PatLit {
+        for i in 0..<cnt(c, x.extra) {
+            let k = value_key(c, kid(c, x.extra, i), st)!
+            if !k.ok {
+                return false
+            }
+        }
+        return true
+    }
+    if x.kind == ast.Nk.PatRange {
+        let ka = int_key(c, x.a, st)!
+        let kb = int_key(c, x.b, st)!
+        return ka.ok && kb.ok
+    }
+    if x.kind == ast.Nk.PatRel {
+        let kr = int_key(c, x.a, st)!
+        return kr.ok
+    }
+    return false
+}
+
+// How often value key k occurs in literal list l.
+fn key_count(c: *mut Ck, l: i32, k: Vk, st: i32): !i32 {
+    let mut n = 0
+    for i in 0..<cnt(c, l) {
+        let v = value_key(c, kid(c, l, i), st)!
+        if vk_eq(v, k) {
+            n += 1
+        }
+    }
+    return n
+}
+
+// Keyed patterns p and q have the same key.
+fn pat_same(c: *mut Ck, p: i32, q: i32, st: i32): !bool {
+    let x = nd(c, p)
+    let y = nd(c, q)
+    if x.kind != y.kind {
+        return false
+    }
+    if x.kind == ast.Nk.PatLit {
+        // Klin sorts the keys: the same multiset.
+        if cnt(c, x.extra) != cnt(c, y.extra) {
+            return false
+        }
+        for i in 0..<cnt(c, x.extra) {
+            let k = value_key(c, kid(c, x.extra, i), st)!
+            let na = key_count(c, x.extra, k, st)!
+            let nb = key_count(c, y.extra, k, st)!
+            if na != nb {
+                return false
+            }
+        }
+        return true
+    }
+    if x.kind == ast.Nk.PatRange {
+        let xa = int_key(c, x.a, st)!
+        let ya = int_key(c, y.a, st)!
+        let xb = int_key(c, x.b, st)!
+        let yb = int_key(c, y.b, st)!
+        return vk_eq(xa, ya) && vk_eq(xb, yb)
+    }
+    let xr = int_key(c, x.a, st)!
+    let yr = int_key(c, y.a, st)!
+    return tab.eq(txt(c, x.tok), txt(c, y.tok)) && vk_eq(xr, yr)
+}
+
+// D24 (Klin f9f5471, _checkDuplicateMatchArms): two unguarded arms with
+// the same constant pattern.
+fn check_dup_arms(c: *mut Ck, arms: i32, st: i32): !i32 {
+    let n = cnt(c, arms)
+    for i in 0..<n {
+        let a = nd(c, kid(c, arms, i))
+        if a.b >= 0 {
+            continue
+        }
+        let ka = pat_keyed(c, a.a, st)!
+        if !ka {
+            continue
+        }
+        for j in 0..<i {
+            let b = nd(c, kid(c, arms, j))
+            if b.b >= 0 {
+                continue
+            }
+            let kb = pat_keyed(c, b.a, st)!
+            if !kb {
+                continue
+            }
+            let same = pat_same(c, a.a, b.a, st)!
+            if same {
+                return error(fail(c, tok_of(c, a.a), b"duplicate `match` pattern (an earlier arm already matches the same values)"))
+            }
         }
     }
     return 0
@@ -1941,10 +2163,11 @@ fn infer_match_expr(c: *mut Ck, e: i32): !i32 {
         return error(fail(c, x.tok, b"`match` as an expression is only allowed as a `let` initializer or an assignment right-hand side"))
     }
     let st = check_match_subject(c, x.a)!
-    let mut ok = check_arms_order(c, x.extra)!
+    check_arms_order(c, x.extra)!
     (*c).allow_match = false
-    ok = check_arms_patterns(c, x.extra, st)!
-    ok = check_exhaustive(c, x.extra, st, x.tok, true)!
+    check_arms_patterns(c, x.extra, st)!
+    check_dup_arms(c, x.extra, st)!
+    check_exhaustive(c, x.extra, st, x.tok, true)!
     let n = cnt(c, x.extra)
     let mut needs = false
     let mut bts = arena_i32(c, n)!
@@ -1981,15 +2204,15 @@ fn infer_match_expr(c: *mut Ck, e: i32): !i32 {
             return mk_result(c, okt)
         }
         let conc = default_concrete(c, okt, x.tok)!
-        ok = reject_zero_choice(c, b"match", conc, x.tok)!
+        reject_zero_choice(c, b"match", conc, x.tok)!
         let res = mk_result(c, conc)!
         for i in 0..<n {
             let body = nd(c, kid(c, x.extra, i)).c
             let bt = bts[i]
             if kind(c, bt) == types.Tk.BareErr || kind(c, bt) == types.Tk.Result {
-                ok = materialize(c, body, res, true)!
+                materialize(c, body, res, true)!
             } else {
-                ok = materialize(c, body, conc, true)!
+                materialize(c, body, conc, true)!
             }
         }
         return res
@@ -2008,9 +2231,9 @@ fn infer_match_expr(c: *mut Ck, e: i32): !i32 {
         return rt
     }
     let conc2 = default_concrete(c, rt, x.tok)!
-    ok = reject_zero_choice(c, b"match", conc2, x.tok)!
+    reject_zero_choice(c, b"match", conc2, x.tok)!
     for i in 0..<n {
-        ok = materialize(c, nd(c, kid(c, x.extra, i)).c, conc2, true)!
+        materialize(c, nd(c, kid(c, x.extra, i)).c, conc2, true)!
     }
     return conc2
 }
@@ -2107,8 +2330,8 @@ fn infer_binary(c: *mut Ck, l: i32, lty: i32, o: []u8, r: i32, pos: i32): !i32 {
         if !is_num(c, u) {
             return error(op_fail(c, pos, o, b"` requires numeric types, got `", u))
         }
-        let mut ok = mat_side(c, l, u)!
-        ok = materialize(c, r, u, true)!
+        mat_side(c, l, u)!
+        materialize(c, r, u, true)!
         return types.BOOL
     }
     if bit_op(o) {
@@ -2121,8 +2344,8 @@ fn infer_binary(c: *mut Ck, l: i32, lty: i32, o: []u8, r: i32, pos: i32): !i32 {
         if !is_int(c, u) {
             return error(op_fail(c, pos, o, b"` requires integer types, got `", u))
         }
-        let mut ok = mat_side(c, l, u)!
-        ok = materialize(c, r, u, true)!
+        mat_side(c, l, u)!
+        materialize(c, r, u, true)!
         return u
     }
     if shift_op(o) {
@@ -2139,8 +2362,8 @@ fn infer_binary(c: *mut Ck, l: i32, lty: i32, o: []u8, r: i32, pos: i32): !i32 {
         if !is_int(c, rc) {
             return error(op_fail(c, pos, o, b"` requires an integer shift count, got `", rc))
         }
-        let mut ok = mat_side(c, l, lc)!
-        ok = materialize(c, r, rc, true)!
+        mat_side(c, l, lc)!
+        materialize(c, r, rc, true)!
         return lc
     }
     if !arith_op(o) {
@@ -2158,7 +2381,7 @@ fn infer_binary(c: *mut Ck, l: i32, lty: i32, o: []u8, r: i32, pos: i32): !i32 {
     if tab.eq(o, b"%") && !is_int(c, u) {
         return error(op_fail(c, pos, o, b"` requires integer types, got `", u))
     }
-    let mut ok = mat_side(c, l, u)!
-    ok = materialize(c, r, u, true)!
+    mat_side(c, l, u)!
+    materialize(c, r, u, true)!
     return u
 }

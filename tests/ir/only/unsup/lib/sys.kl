@@ -1,0 +1,6 @@
+// A `sys` module with a body-less function other than call6.
+module sys
+
+pub fn call6(nr: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64): i64
+
+pub fn nope(x: i64): i64

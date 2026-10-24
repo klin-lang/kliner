@@ -1,0 +1,8 @@
+// kliner-run only: a call of a body-less function other than
+// sys.call6 is rejected by the lowering.
+module main
+import sys
+
+fn main() {
+    let r = sys.call6(60, sys.nope(1), 0, 0, 0, 0, 0)
+}

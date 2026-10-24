@@ -1,0 +1,9 @@
+fn main(): i32 {
+    let x = 3
+    match x {
+        < 3 { return 1 }
+        <= 2 { return 2 }
+        < 3 { return 2 }
+        else { return 0 }
+    }
+}

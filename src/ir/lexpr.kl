@@ -1,0 +1,901 @@
+// lexpr.kl — lowering expressions. rv(e) is the value of e: a register
+// holding a scalar, or the address of an aggregate (struct, array,
+// slice, !T). addr(e) is the address of a place. store_as(e, dst, t)
+// writes the value of e as type t at dst (T into !T: is_err = 0, the
+// value at ROK). A register holds the value normalized to the natural
+// type of the expression (the variable's, the field's, …); a wider
+// integer context uses it unchanged.
+module ir
+import ast
+import check
+import lex
+import load
+import tab
+import types
+
+fn txt_is(s: []u8, t: []u8): bool {
+    return tab.eq(s, t)
+}
+
+// Expressions whose value is a fresh temporary (no aliasing).
+fn fresh(l: *mut Lw, e: i32): bool {
+    let k = nk(l, peel(l, e))
+    return k == ast.Nk.Call || k == ast.Nk.MCall || k == ast.Nk.StructLit || k == ast.Nk.Array || k == ast.Nk.Slice || k == ast.Nk.Bytes || k == ast.Nk.ErrorE || k == ast.Nk.Or || k == ast.Nk.MatchE
+}
+
+fn binop(s: []u8): Op {
+    if txt_is(s, b"+") {
+        return Op.Add
+    }
+    if txt_is(s, b"-") {
+        return Op.Sub
+    }
+    if txt_is(s, b"*") {
+        return Op.Mul
+    }
+    if txt_is(s, b"/") {
+        return Op.Div
+    }
+    if txt_is(s, b"%") {
+        return Op.Rem
+    }
+    if txt_is(s, b"&") {
+        return Op.And
+    }
+    if txt_is(s, b"|") {
+        return Op.Or
+    }
+    if txt_is(s, b"^") {
+        return Op.Xor
+    }
+    if txt_is(s, b"<<") {
+        return Op.Shl
+    }
+    if txt_is(s, b">>") {
+        return Op.Shr
+    }
+    if txt_is(s, b"==") {
+        return Op.Eq
+    }
+    if txt_is(s, b"!=") {
+        return Op.Ne
+    }
+    if txt_is(s, b"<") {
+        return Op.Lt
+    }
+    if txt_is(s, b"<=") {
+        return Op.Le
+    }
+    if txt_is(s, b">") {
+        return Op.Gt
+    }
+    if txt_is(s, b">=") {
+        return Op.Ge
+    }
+    return Op.Nop
+}
+
+fn is_cmp(op: Op): bool {
+    return op == Op.Eq || op == Op.Ne || op == Op.Lt || op == Op.Le || op == Op.Gt || op == Op.Ge
+}
+
+// The value of expression e.
+fn rv(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    let k = x.kind
+    if k == ast.Nk.Group {
+        return rv(l, x.a)!
+    }
+    if k == ast.Nk.Int {
+        return kconst(l, irt(l, rt(l, e)), lit_int(l, (*l).cf, x.tok))!
+    }
+    if k == ast.Nk.Bool {
+        let mut v: i64 = 0
+        if is_txt(l, x.tok, b"true") {
+            v = 1
+        }
+        return kconst(l, U8, v)!
+    }
+    if k == ast.Nk.Str {
+        return str_lit(l, x.tok)!
+    }
+    if k == ast.Nk.Bytes {
+        let b = lex.str_value(&(*file(l)).lx, (*l).a, x.tok)!
+        let off = add_data((*l).g, b)!
+        let pr = newr(l)
+        ins(l, Op.Data, PTR, pr, -1, -1, -1, off)!
+        return make_slice(l, rt(l, e), pr, kconst(l, I32, cast(i64, b.len))!)!
+    }
+    if k == ast.Nk.Name {
+        return name_val(l, e)!
+    }
+    if k == ast.Nk.Get {
+        return get_val(l, e)!
+    }
+    if k == ast.Nk.Index {
+        let a = addr(l, e)!
+        return value_at(l, a, rt(l, e))!
+    }
+    if k == ast.Nk.Slice {
+        return slice_val(l, e)!
+    }
+    if k == ast.Nk.StructLit || k == ast.Nk.Array || k == ast.Nk.ErrorE {
+        let mut t = rt(l, e)
+        if k == ast.Nk.ErrorE && (!known(l, t) || tk(l, t) != types.Tk.Result) {
+            t = (*l).ret
+            if tk(l, t) != types.Tk.Result {
+                return error(unsup(l, x.tok, b"`error` outside a function returning `!T`"))
+            }
+        }
+        let tmp = temp(l, t)!
+        into(l, e, tmp, t)!
+        return tmp
+    }
+    if k == ast.Nk.Cast {
+        let tgt = rt(l, e)
+        let src = rt(l, x.b)
+        let v = rv(l, x.b)!
+        if is_agg(l, tgt) {
+            return v
+        }
+        if is_float(l, tgt) || is_float(l, src) {
+            return error(unsup(l, x.tok, b"floating point"))
+        }
+        return conv(l, irt(l, tgt), irt(l, src), v)!
+    }
+    if k == ast.Nk.Unary {
+        return unary(l, e)!
+    }
+    if k == ast.Nk.Binary {
+        return binary(l, e)!
+    }
+    if k == ast.Nk.Call {
+        return call(l, e)!
+    }
+    if k == ast.Nk.MCall {
+        return mcall(l, e)!
+    }
+    if k == ast.Nk.Propagate {
+        return propagate(l, e)!
+    }
+    if k == ast.Nk.Or {
+        return or_val(l, e)!
+    }
+    if k == ast.Nk.MatchE {
+        let t = rt(l, e)
+        let mut res = -1
+        if is_agg(l, t) {
+            res = temp(l, t)!
+        } else {
+            res = newr(l)
+        }
+        return match_any(l, e, res, t)!
+    }
+    if k == ast.Nk.Float {
+        return error(unsup(l, x.tok, b"floating point"))
+    }
+    if k == ast.Nk.Pick {
+        return error(unsup(l, x.tok, b"`pick`"))
+    }
+    if k == ast.Nk.Await {
+        return error(unsup(l, x.tok, b"`await`"))
+    }
+    return error(unsup(l, x.tok, b"this expression"))
+}
+
+fn str_lit(l: *mut Lw, tok: i32): !i32 {
+    let b0 = lex.str_value(&(*file(l)).lx, (*l).a, tok)!
+    // `\$` in a Str is the two bytes `\$` (interpolation); C prints `$`
+    let mut b = b0
+    let mut n = 0
+    for i in 0..<b0.len {
+        if b0[i] == 92 && i + 1 < b0.len && b0[i + 1] == 36 {
+            continue
+        }
+        b[n] = b0[i]
+        n += 1
+    }
+    let off = add_data((*l).g, b[0:n])!
+    let r = newr(l)
+    ins(l, Op.Data, PTR, r, -1, -1, -1, off)!
+    return r
+}
+
+// A new slice {ptr, len} of type t.
+fn make_slice(l: *mut Lw, t: i32, ptr: i32, n: i32): !i32 {
+    let tmp = slot_addr(l, alloc_slot(l, 16, 8))!
+    store(l, PTR, tmp, 0, ptr)!
+    store(l, I32, tmp, 8, n)!
+    return tmp
+}
+
+// What node e resolved to (check.R_*), as a value.
+fn resolved(l: *mut Lw, e: i32, code: i32, tok: i32): !i32 {
+    let kind = code & 7
+    let idx = code >> 3
+    if kind == check.R_GLOBAL {
+        let a = glob_addr(l, idx)!
+        return value_at(l, a, (*(*l).c).glob_ty[idx])!
+    }
+    if kind == check.R_CONST {
+        return const_val(l, idx)!
+    }
+    if kind == check.R_FN {
+        let r = newr(l)
+        ins(l, Op.FnRef, PTR, r, idx, -1, -1, 0)!
+        return r
+    }
+    return error(fail(l, tok, b"internal: unresolved name"))
+}
+
+fn const_val(l: *mut Lw, k: i32): !i32 {
+    let t = (*(*l).c).const_ty[k]
+    if types.is_int(&(*(*l).c).t, t) {
+        return kconst(l, irt(l, t), check.const_int((*l).c, k))!
+    }
+    let r = (*(*l).p).consts.r[k]
+    let old = enter(l, r.file)
+    let x = nd(l, r.node)
+    let v = rv(l, x.c)!
+    let o = enter(l, old)
+    return v
+}
+
+fn name_val(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    let code = rf(l, e)
+    if code >= 0 {
+        return resolved(l, e, code, x.tok)!
+    }
+    let i = find_local(l, txt(l, x.tok))
+    if i < 0 {
+        return error(fail(l, x.tok, b"internal: unknown name"))
+    }
+    let a = local_addr(l, i)!
+    return value_at(l, a, (*l).lty[i])!
+}
+
+fn get_val(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    let f = flags(l, e)
+    if (f & F_ENUMC) != 0 {
+        let et = rt(l, e)
+        return kconst(l, irt(l, et), enum_value(l, ty(l, et).a, txt(l, x.tok)))!
+    }
+    if (f & (F_MODV | F_MODG)) != 0 {
+        return resolved(l, e, rf(l, e), x.tok)!
+    }
+    let ot = rt(l, x.a)
+    let ok_ = tk(l, ot)
+    if ok_ == types.Tk.Array || ok_ == types.Tk.Slice || ok_ == types.Tk.Str {
+        // .len (the checker allows nothing else)
+        if ok_ == types.Tk.Array {
+            return kconst(l, I32, ty(l, ot).n)!
+        }
+        let b = rv(l, x.a)!
+        if ok_ == types.Tk.Slice {
+            return load(l, I32, b, 8)!
+        }
+        return strlen(l, b, x.tok)!
+    }
+    let a = addr(l, e)!
+    return value_at(l, a, rt(l, e))!
+}
+
+// strlen of the C string at s, as i32.
+fn strlen(l: *mut Lw, s: i32, tok: i32): !i32 {
+    let n = kconst(l, I64, 0)!
+    let top = newlab(l, tok)!
+    let body = newlab(l, tok)!
+    let end = newlab(l, tok)!
+    place(l, top)!
+    let p = op2(l, Op.Add, PTR, s, n)!
+    let ch = load(l, U8, p, 0)!
+    br(l, ch, body, end)!
+    place(l, body)!
+    let one = kconst(l, I64, 1)!
+    let n2 = op2(l, Op.Add, I64, n, one)!
+    mov(l, n, n2)!
+    jmp(l, top)!
+    place(l, end)!
+    return conv(l, I32, I64, n)!
+}
+
+// The address of a place (or of an aggregate value).
+fn addr(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    let k = x.kind
+    if k == ast.Nk.Group {
+        return addr(l, x.a)!
+    }
+    if k == ast.Nk.Name {
+        let code = rf(l, e)
+        if code >= 0 && (code & 7) == check.R_GLOBAL {
+            return glob_addr(l, code >> 3)!
+        }
+        if code < 0 {
+            let i = find_local(l, txt(l, x.tok))
+            if i >= 0 {
+                return local_addr(l, i)!
+            }
+        }
+    }
+    if k == ast.Nk.Get {
+        let f = flags(l, e)
+        if (f & (F_MODV | F_MODG)) != 0 {
+            let code = rf(l, e)
+            if (code & 7) == check.R_GLOBAL {
+                return glob_addr(l, code >> 3)!
+            }
+        } else if (f & F_ENUMC) == 0 {
+            let st = rt(l, x.a)
+            if tk(l, st) == types.Tk.Struct {
+                let s = ty(l, st).a
+                let j = sfield(l, s, txt(l, x.tok))
+                let off = foffset(l, s, j)!
+                let b = rv(l, x.a)!
+                return addk(l, b, off)!
+            }
+        }
+    }
+    if k == ast.Nk.Index {
+        let ot = rt(l, x.a)
+        let ox = ty(l, ot)
+        let b = rv(l, x.a)!
+        let mut base = b
+        let mut es: i64 = 1
+        if ox.kind == types.Tk.Slice {
+            base = load(l, PTR, b, 0)!
+            es = size(l, ox.a)!
+        } else if ox.kind == types.Tk.Array {
+            es = size(l, ox.a)!
+        } else if ox.kind != types.Tk.Str {
+            return error(unsup(l, x.tok, b"indexing this type"))
+        }
+        let i0 = rv(l, x.b)!
+        let i = conv(l, I64, irt(l, rt(l, x.b)), i0)!
+        let mut off = i
+        if es != 1 {
+            let esr = kconst(l, I64, es)!
+            off = op2(l, Op.Mul, I64, i, esr)!
+        }
+        return op2(l, Op.Add, PTR, base, off)!
+    }
+    if k == ast.Nk.Unary && is_txt(l, x.tok, b"*") {
+        return rv(l, x.a)!
+    }
+    if is_agg(l, rt(l, e)) {
+        return rv(l, e)!
+    }
+    return error(unsup(l, x.tok, b"taking the address of this expression"))
+}
+
+fn slice_val(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    let ot = rt(l, x.a)
+    let ox = ty(l, ot)
+    let b = rv(l, x.a)!
+    let mut base = b
+    let mut n = -1
+    if ox.kind == types.Tk.Slice {
+        base = load(l, PTR, b, 0)!
+        n = load(l, I32, b, 8)!
+    } else if ox.kind == types.Tk.Array {
+        n = kconst(l, I32, ox.n)!
+    } else {
+        return error(unsup(l, x.tok, b"slicing this type"))
+    }
+    let es = size(l, ox.a)!
+    let mut lo = -1
+    if x.b >= 0 {
+        let v = rv(l, x.b)!
+        lo = conv(l, I32, irt(l, rt(l, x.b)), v)!
+    } else {
+        lo = kconst(l, I32, 0)!
+    }
+    let mut hi = n
+    if x.c >= 0 {
+        let v = rv(l, x.c)!
+        hi = conv(l, I32, irt(l, rt(l, x.c)), v)!
+    }
+    let lo64 = conv(l, I64, I32, lo)!
+    let esr = kconst(l, I64, es)!
+    let off = op2(l, Op.Mul, I64, lo64, esr)!
+    let p = op2(l, Op.Add, PTR, base, off)!
+    let len = op2(l, Op.Sub, I32, hi, lo)!
+    return make_slice(l, rt(l, e), p, len)!
+}
+
+fn unary(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    let o = txt(l, x.tok)
+    if txt_is(o, b"&") {
+        return addr(l, x.a)!
+    }
+    if txt_is(o, b"*") {
+        let p = rv(l, x.a)!
+        return value_at(l, p, rt(l, e))!
+    }
+    let v = rv(l, x.a)!
+    if txt_is(o, b"!") {
+        let one = kconst(l, U8, 1)!
+        return op2(l, Op.Xor, U8, v, one)!
+    }
+    let t = irt(l, rt(l, e))
+    if txt_is(o, b"-") {
+        return op1(l, Op.Neg, t, v)!
+    }
+    if txt_is(o, b"~") {
+        return op1(l, Op.Not, t, v)!
+    }
+    return error(unsup(l, x.tok, b"this operator"))
+}
+
+// The IR type of a binary operation's operands.
+fn operand_t(l: *mut Lw, x: ast.Node, e: i32): u8 {
+    let ta = rt(l, x.a)
+    if known(l, ta) {
+        return irt(l, ta)
+    }
+    let tb = rt(l, x.b)
+    if known(l, tb) {
+        return irt(l, tb)
+    }
+    return irt(l, rt(l, e))
+}
+
+fn binary(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    let o = txt(l, x.tok)
+    let and = txt_is(o, b"&&")
+    if and || txt_is(o, b"||") {
+        let r = newr(l)
+        let a = rv(l, x.a)!
+        mov(l, r, a)!
+        let rhs = newlab(l, x.tok)!
+        let end = newlab(l, x.tok)!
+        if and {
+            br(l, a, rhs, end)!
+        } else {
+            br(l, a, end, rhs)!
+        }
+        place(l, rhs)!
+        let b = rv(l, x.b)!
+        mov(l, r, b)!
+        jmp(l, end)!
+        place(l, end)!
+        return r
+    }
+    let op = binop(o)
+    if op == Op.Nop {
+        return error(unsup(l, x.tok, b"this operator"))
+    }
+    let et = rt(l, e)
+    if is_float(l, et) || is_float(l, rt(l, x.a)) {
+        return error(unsup(l, x.tok, b"floating point"))
+    }
+    if is_cmp(op) {
+        let t = operand_t(l, x, e)
+        let a = rv(l, x.a)!
+        let b = rv(l, x.b)!
+        return op2(l, op, t, a, b)!
+    }
+    if known(l, et) && tk(l, et) == types.Tk.Ptr {
+        return error(unsup(l, x.tok, b"pointer arithmetic"))
+    }
+    let mut t = irt(l, et)
+    if !known(l, et) {
+        t = operand_t(l, x, e)
+    }
+    let a = rv(l, x.a)!
+    let b = rv(l, x.b)!
+    return op2(l, op, t, a, b)!
+}
+
+// ---- calls ----
+
+// Type of parameter j of function fi (from its own file).
+fn fn_pty(l: *mut Lw, fi: i32, j: i32): i32 {
+    let r = (*(*l).p).funcs.r[fi]
+    let f = load.file((*l).p, r.file)
+    let sig = (*f).t.nodes[(*f).t.nodes[r.node].c]
+    return (*f).rt[ast.item(&(*f).t, sig.extra, j)]
+}
+
+fn fn_recv_mut(l: *mut Lw, fi: i32): bool {
+    let r = (*(*l).p).funcs.r[fi]
+    let f = load.file((*l).p, r.file)
+    let sig = (*f).t.nodes[(*f).t.nodes[r.node].c]
+    return sig.a >= 0 && (*f).t.nodes[sig.a].b == 1
+}
+
+// An argument of parameter type pt: a register, or a fresh copy.
+fn arg(l: *mut Lw, e: i32, pt: i32): !i32 {
+    if is_agg(l, pt) {
+        let tmp = temp(l, pt)!
+        store_as(l, e, tmp, pt)!
+        return tmp
+    }
+    return rv(l, e)!
+}
+
+// Calls fi (direct, fi >= 0) or the fn value fv of type ft. recv: the
+// receiver register or -1. Arguments are list `args` of the current file.
+fn do_call(l: *mut Lw, fi: i32, fv: i32, ft: i32, recv: i32, args: i32, tok: i32): !i32 {
+    let g = (*l).g
+    let mut regs: [64]i32
+    let mut n = 0
+    let mut ret = -1
+    if fi >= 0 {
+        ret = (*(*l).c).fn_ret[fi]
+    } else {
+        ret = ty(l, ft).a
+    }
+    if is_float(l, ret) {
+        return error(unsup(l, tok, b"floating point"))
+    }
+    let na = cnt(l, args)
+    if na > 60 {
+        return error(unsup(l, tok, b"a call with more than 60 arguments"))
+    }
+    let sys = fi >= 0 && (*g).fns[fi].kind == 1
+    if fi >= 0 && (*g).fns[fi].kind == 2 {
+        let r = unsup(l, tok, b"calling `")
+        (*g).mn = 0
+        madd(g, b"calling `")
+        madd(g, (*g).fns[fi].name)
+        madd(g, b"` (a function without a body)")
+        madd(g, b" is not supported yet")
+        return error(r)
+    }
+    let mut res = -1
+    if !sys && is_agg(l, ret) {
+        res = temp(l, ret)!
+        regs[n] = res
+        n += 1
+    }
+    if recv >= 0 {
+        regs[n] = recv
+        n += 1
+    }
+    for j in 0..<na {
+        let mut pt: i32 = -1
+        if fi >= 0 {
+            pt = fn_pty(l, fi, j)
+        } else {
+            pt = types.param(&(*(*l).c).t, ft, j)
+        }
+        regs[n] = arg(l, kid(l, args, j), pt)!
+        n += 1
+    }
+    let base = (*g).na
+    for j in 0..<n {
+        add_arg(g, regs[j])!
+    }
+    if sys {
+        let d = newr(l)
+        ins(l, Op.Sys, I64, d, -1, base, 7, 0)!
+        return d
+    }
+    let mut d = -1
+    let mut rty = VOID
+    if res < 0 && tk(l, ret) != types.Tk.Void {
+        d = newr(l)
+        rty = irt(l, ret)
+    }
+    if fi >= 0 {
+        ins(l, Op.Call, rty, d, fi, base, n, 0)!
+    } else {
+        ins(l, Op.CallInd, rty, d, fv, base, n, 0)!
+    }
+    if res >= 0 {
+        return res
+    }
+    return d
+}
+
+fn call(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    if (flags(l, e) & F_CSTR) != 0 {
+        // cstr_u8(s): the bytes of a C string, without the NUL
+        let s = rv(l, kid(l, x.extra, 0))!
+        let n = strlen(l, s, x.tok)!
+        return make_slice(l, rt(l, e), s, n)!
+    }
+    let code = rf(l, e)
+    if code >= 0 && (code & 7) == check.R_FN {
+        return do_call(l, code >> 3, -1, -1, -1, x.extra, x.tok)!
+    }
+    if code >= 0 && (code & 7) == check.R_GLOBAL {
+        let gi = code >> 3
+        let a = glob_addr(l, gi)!
+        let fv = load(l, PTR, a, 0)!
+        return do_call(l, -1, fv, (*(*l).c).glob_ty[gi], -1, x.extra, x.tok)!
+    }
+    if x.a < 0 {
+        let i = find_local(l, txt(l, x.b))
+        if i >= 0 {
+            let a = local_addr(l, i)!
+            let fv = load(l, PTR, a, 0)!
+            return do_call(l, -1, fv, (*l).lty[i], -1, x.extra, x.tok)!
+        }
+    }
+    let g = (*l).g
+    let r = fail(l, x.tok, b"`")
+    madd(g, txt(l, x.b))
+    madd(g, b"` is not supported yet")
+    return error(r)
+}
+
+fn mcall(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    let code = rf(l, e)
+    if code >= 0 && (code & 7) == check.R_FN {
+        let mi = code >> 3
+        let rty = (*(*l).c).fn_recv[mi]
+        if rty < 0 {
+            // associated function T.f(...)
+            return do_call(l, mi, -1, -1, -1, x.extra, x.tok)!
+        }
+        let mut recv = -1
+        if fn_recv_mut(l, mi) {
+            recv = addr(l, x.a)!
+        } else {
+            recv = arg(l, x.a, rty)!
+        }
+        return do_call(l, mi, -1, -1, recv, x.extra, x.tok)!
+    }
+    // a call through a fn-typed field
+    let st = rt(l, x.a)
+    let s = ty(l, st).a
+    let j = sfield(l, s, txt(l, x.tok))
+    let ft = sfield_ty(l, s, j)
+    let off = foffset(l, s, j)!
+    let b = rv(l, x.a)!
+    let fv = load(l, PTR, b, off)!
+    return do_call(l, -1, fv, ft, -1, x.extra, x.tok)!
+}
+
+// ---- results ----
+
+// return error(code) from the current function.
+fn err_return(l: *mut Lw, code: i32, tok: i32): !i32 {
+    if tk(l, (*l).ret) != types.Tk.Result {
+        return error(unsup(l, tok, b"`!` here"))
+    }
+    let sp = slot_addr(l, (*l).sret_off)!
+    let dst = load(l, PTR, sp, 0)!
+    let one = kconst(l, U8, 1)!
+    store(l, U8, dst, 0, one)!
+    store(l, I32, dst, 4, code)!
+    run_defers(l, 0)!
+    ins(l, Op.Ret, I64, -1, -1, -1, -1, 0)!
+    return 0
+}
+
+fn propagate(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    let r = rv(l, x.a)!
+    let vt = ty(l, rt(l, x.a)).a
+    let flag = load(l, U8, r, 0)!
+    let le = newlab(l, x.tok)!
+    let lk = newlab(l, x.tok)!
+    br(l, flag, le, lk)!
+    place(l, le)!
+    let code = load(l, I32, r, 4)!
+    err_return(l, code, x.tok)!
+    place(l, lk)!
+    if tk(l, vt) == types.Tk.Void {
+        return -1
+    }
+    let va = addk(l, r, ROK)!
+    return value_at(l, va, vt)!
+}
+
+fn or_val(l: *mut Lw, e: i32): !i32 {
+    let x = nd(l, e)
+    let r = rv(l, x.a)!
+    let vt = ty(l, rt(l, x.a)).a
+    let mut t = rt(l, e)
+    if !known(l, t) {
+        t = vt
+    }
+    let agg = is_agg(l, t)
+    let mut res = -1
+    if agg {
+        res = temp(l, t)!
+    } else {
+        res = newr(l)
+    }
+    let flag = load(l, U8, r, 0)!
+    let le = newlab(l, x.tok)!
+    let lk = newlab(l, x.tok)!
+    let end = newlab(l, x.tok)!
+    br(l, flag, le, lk)!
+    place(l, lk)!
+    if tk(l, vt) != types.Tk.Void {
+        let va = addk(l, r, ROK)!
+        let v = value_at(l, va, vt)!
+        if agg {
+            put(l, res, t, v)!
+        } else {
+            mov(l, res, v)!
+        }
+    }
+    jmp(l, end)!
+    place(l, le)!
+    let fb = nd(l, x.b)
+    push_scope(l, fb.tok)!
+    let code = load(l, I32, r, 4)!
+    let ei = def_local(l, b"err", types.I32, false, fb.tok)!
+    let ea = local_addr(l, ei)!
+    store(l, I32, ea, 0, code)!
+    let n = cnt(l, fb.extra)
+    for i in 0..<n {
+        stmt(l, kid(l, fb.extra, i))!
+    }
+    if fb.a >= 0 {
+        if agg {
+            store_as(l, fb.a, res, t)!
+        } else {
+            let v = rv(l, fb.a)!
+            mov(l, res, v)!
+        }
+    }
+    pop_scope(l, true)!
+    jmp(l, end)!
+    place(l, end)!
+    return res
+}
+
+// ---- match ----
+
+// Statement match (res < 0) or match expression: each arm's value goes
+// to register res (scalar t) or is stored at address res (aggregate t).
+fn match_any(l: *mut Lw, m: i32, res: i32, t: i32): !i32 {
+    let x = nd(l, m)
+    let st = rt(l, x.a)
+    let it = irt(l, st)
+    let s = rv(l, x.a)!
+    let end = newlab(l, x.tok)!
+    let n = cnt(l, x.extra)
+    for i in 0..<n {
+        let arm = nd(l, kid(l, x.extra, i))
+        let next = newlab(l, arm.tok)!
+        let body = newlab(l, arm.tok)!
+        let pat = nd(l, arm.a)
+        if pat.kind == ast.Nk.PatLit {
+            let nv = cnt(l, pat.extra)
+            for j in 0..<nv {
+                let v = rv(l, kid(l, pat.extra, j))!
+                let c = op2(l, Op.Eq, it, s, v)!
+                let more = newlab(l, arm.tok)!
+                br(l, c, body, more)!
+                place(l, more)!
+            }
+            jmp(l, next)!
+        } else if pat.kind == ast.Nk.PatRange {
+            let lo = rv(l, pat.a)!
+            let c1 = op2(l, Op.Ge, it, s, lo)!
+            let mid = newlab(l, arm.tok)!
+            br(l, c1, mid, next)!
+            place(l, mid)!
+            let hi = rv(l, pat.b)!
+            let c2 = op2(l, Op.Le, it, s, hi)!
+            br(l, c2, body, next)!
+        } else if pat.kind == ast.Nk.PatRel {
+            let v = rv(l, pat.a)!
+            let op = binop(txt(l, pat.tok))
+            let c = op2(l, op, it, s, v)!
+            br(l, c, body, next)!
+        } else {
+            jmp(l, body)!
+        }
+        place(l, body)!
+        if arm.b >= 0 {
+            let gc = rv(l, arm.b)!
+            let gl = newlab(l, arm.tok)!
+            br(l, gc, gl, next)!
+            place(l, gl)!
+        }
+        if res < 0 || nk(l, arm.c) == ast.Nk.Block {
+            block(l, arm.c)!
+        } else if is_agg(l, t) {
+            store_as(l, arm.c, res, t)!
+        } else {
+            let v = rv(l, arm.c)!
+            mov(l, res, v)!
+        }
+        jmp(l, end)!
+        place(l, next)!
+    }
+    place(l, end)!
+    return res
+}
+
+// ---- stores ----
+
+// Writes e as a value of type dt at dst; T into !T sets is_err = 0.
+fn store_as(l: *mut Lw, e: i32, dst: i32, dt: i32): !i32 {
+    if tk(l, dt) == types.Tk.Result {
+        let pe = peel(l, e)
+        let et = rt(l, pe)
+        let k = nk(l, pe)
+        let whole = k == ast.Nk.ErrorE || (known(l, et) && tk(l, et) == types.Tk.Result && k != ast.Nk.Int)
+        if !whole {
+            let zero8 = kconst(l, U8, 0)!
+            store(l, U8, dst, 0, zero8)!
+            let vt = ty(l, dt).a
+            if tk(l, vt) == types.Tk.Void {
+                return 0
+            }
+            let va = addk(l, dst, ROK)!
+            return store_as(l, e, va, vt)!
+        }
+    }
+    return into(l, e, dst, dt)!
+}
+
+fn into(l: *mut Lw, e: i32, dst: i32, dt: i32): !i32 {
+    let pe = peel(l, e)
+    let x = nd(l, pe)
+    if x.kind == ast.Nk.StructLit && tk(l, dt) == types.Tk.Struct {
+        let s = ty(l, dt).a
+        let sz = size(l, dt)!
+        zero(l, dst, sz)!
+        let nf = sfield_n(l, s)
+        let n = cnt(l, x.extra)
+        if x.b == 1 {
+            for i in 0..<n / 2 {
+                let ft = kid(l, x.extra, 2 * i)
+                let j = sfield(l, s, txt(l, ft))
+                let off = foffset(l, s, j)!
+                let fa = addk(l, dst, off)!
+                store_as(l, kid(l, x.extra, 2 * i + 1), fa, sfield_ty(l, s, j))!
+            }
+        } else {
+            for j in 0..<n {
+                if j < nf {
+                    let off = foffset(l, s, j)!
+                    let fa = addk(l, dst, off)!
+                    store_as(l, kid(l, x.extra, j), fa, sfield_ty(l, s, j))!
+                }
+            }
+        }
+        return 0
+    }
+    if x.kind == ast.Nk.Array {
+        let n = cnt(l, x.extra)
+        let dx = ty(l, dt)
+        if dx.kind == types.Tk.Array {
+            let es = size(l, dx.a)!
+            if cast(i64, n) < dx.n {
+                let sz = size(l, dt)!
+                zero(l, dst, sz)!
+            }
+            for i in 0..<n {
+                let ea = addk(l, dst, es * cast(i64, i))!
+                store_as(l, kid(l, x.extra, i), ea, dx.a)!
+            }
+            return 0
+        }
+        if n == 0 {
+            let sz = size(l, dt)!
+            return zero(l, dst, sz)!
+        }
+        return error(unsup(l, x.tok, b"this array literal"))
+    }
+    if x.kind == ast.Nk.ErrorE {
+        let one = kconst(l, U8, 1)!
+        store(l, U8, dst, 0, one)!
+        let c0 = rv(l, x.a)!
+        let c = conv(l, I32, irt(l, rt(l, x.a)), c0)!
+        return store(l, I32, dst, 4, c)!
+    }
+    if x.kind == ast.Nk.MatchE && is_agg(l, dt) {
+        let r = match_any(l, pe, dst, dt)!
+        return 0
+    }
+    let v = rv(l, pe)!
+    return put(l, dst, dt, v)!
+}

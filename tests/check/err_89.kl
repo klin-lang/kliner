@@ -1,0 +1,5 @@
+fn main(): i32 {
+    let a: [2]i32 = [1, 2]
+    puts(a)
+    return 0
+}

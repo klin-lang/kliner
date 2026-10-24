@@ -1,0 +1,141 @@
+// IR golden: structs (by value), arrays, slices, methods, globals,
+// constants, strings, destructuring, multi-assignment.
+module main
+import arena
+import os
+import out
+
+const N: i32 = 8
+const MASK: u32 = (1 << 12) - 1
+const GREETING: []u8 = b"grüß\t\$x\n"
+
+struct Point {
+    x: i32
+    y: i32
+}
+
+struct Box {
+    tag: u8
+    lo: Point
+    hi: Point
+    w: i64
+    name: []u8
+    cells: [4]u16
+}
+
+let mut counter: i32 = 3
+let mut origin: Point = Point { x: 1, y: 2 }
+
+fn p(o: *mut out.Out, name: []u8, v: i64) {
+    (*o).lit(name)
+    (*o).lit(b" ")
+    (*o).dec(v)
+    (*o).nl()
+}
+
+fn Point.new(x: i32, y: i32): Point {
+    return Point { x: x, y: y }
+}
+
+fn (q: Point) sum(): i32 {
+    return q.x + q.y
+}
+
+fn (mut q: Point) scale(k: i32) {
+    q.x *= k
+    q.y *= k
+}
+
+fn bump(q: Point): Point {
+    let mut r = q
+    r.x += 100
+    return r
+}
+
+fn area(b: Box): i64 {
+    return cast(i64, (b.hi.x - b.lo.x) * (b.hi.y - b.lo.y)) * b.w
+}
+
+fn total(xs: []i32): i64 {
+    let mut s: i64 = 0
+    for i in 0..<xs.len {
+        s += cast(i64, xs[i])
+    }
+    return s
+}
+
+fn tick(): i32 {
+    counter += 1
+    return counter
+}
+
+fn main() {
+    let mut o = out.Out.stdout()
+    let mut a = Point.new(3, 4)
+    let b = bump(a)
+    p(&o, b"a.x", cast(i64, a.x))
+    p(&o, b"b.x", cast(i64, b.x))
+    a.scale(10)
+    p(&o, b"scaled sum", cast(i64, a.sum()))
+    let mut bx = Box { tag: 7, lo: Point { x: 1, y: 1 }, hi: a, w: 2, name: b"box", cells: [1, 2, 3, 65535] }
+    p(&o, b"area", area(bx))
+    let cp = bx
+    bx.hi.x = 0
+    bx.cells[3] = 9
+    p(&o, b"copy kept", cast(i64, cp.hi.x) + cast(i64, cp.cells[3]))
+    p(&o, b"cells", cast(i64, bx.cells[0] + bx.cells[1] + bx.cells[2] + bx.cells[3]))
+    o.lit(bx.name)
+    o.nl()
+    let mut arr: [8]i32
+    for i in 0..<N {
+        arr[i] = i * i
+    }
+    p(&o, b"total", total(arr[:]))
+    p(&o, b"mid", total(arr[2:5]))
+    let s = arr[3:]
+    p(&o, b"s.len", cast(i64, s.len))
+    p(&o, b"s[0]", cast(i64, s[0]))
+    let mut pts: [3]Point
+    pts[1] = Point { x: 5, y: 6 }
+    pts[2].y = 9
+    p(&o, b"pts", cast(i64, pts[0].x + pts[1].sum() + pts[2].y))
+    let pa = &pts[1]
+    (*pa).x = 50
+    p(&o, b"ptr", cast(i64, pts[1].x))
+    p(&o, b"mask", cast(i64, MASK))
+    o.lit(GREETING)
+    p(&o, b"glen", cast(i64, GREETING.len))
+    let st = "héllo"
+    p(&o, b"str len", cast(i64, st.len))
+    p(&o, b"str[1]", cast(i64, st[1]))
+    o.lit(cstr_u8(st))
+    o.nl()
+    p(&o, b"tick", cast(i64, tick() * 10 + tick()))
+    p(&o, b"origin", cast(i64, origin.sum()))
+    origin.scale(3)
+    p(&o, b"origin3", cast(i64, origin.y))
+    let mut x = 1
+    let mut y = 2
+    x, y = y, x
+    p(&o, b"swap", cast(i64, x * 10 + y))
+    let [q, r] = [a.x / 7, a.x % 7]
+    p(&o, b"qr", cast(i64, q * 100 + r))
+    let { x: px, y: py } = b
+    p(&o, b"destr", cast(i64, px + py))
+    let mut ar = arena.Arena.new(1 << 16) or {
+        os.exit(9)
+        return
+    }
+    let mut buf = arena.alloc_u8(&ar, 32) or {
+        os.exit(8)
+        return
+    }
+    for i in 0..<buf.len {
+        buf[i] = cast(u8, 'a' + i % 26)
+    }
+    o.lit(buf[0:5])
+    o.nl()
+    arena.free_all(&ar)
+    o.flush_quiet()
+    os.exit(0)
+}
