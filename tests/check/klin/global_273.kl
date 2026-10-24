@@ -1,0 +1,4 @@
+let mut n: i32 = 1
+fn main() {
+    n(1)
+}

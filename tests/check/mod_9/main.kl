@@ -1,0 +1,5 @@
+import util
+import other
+fn main() {
+    let x = util.f() + other.g()
+}

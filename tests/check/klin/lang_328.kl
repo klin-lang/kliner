@@ -1,0 +1,3 @@
+@[codename("SysTick_Handler")]
+fn tick() {}
+fn main() {}

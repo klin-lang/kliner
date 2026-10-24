@@ -1,0 +1,3 @@
+const KW: []u8 = b"fn"
+fn take(xs: [KW]u8) {}
+fn main() {}

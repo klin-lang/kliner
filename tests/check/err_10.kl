@@ -1,0 +1,14 @@
+enum C: u8 {
+    R
+    G
+    B
+}
+fn main() {
+    let c = C.R
+    match c {
+        C.R {
+        }
+        C.G {
+        }
+    }
+}

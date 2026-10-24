@@ -1,0 +1,2 @@
+module util
+const K: i32 = 2

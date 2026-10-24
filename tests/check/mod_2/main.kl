@@ -1,0 +1,5 @@
+import util
+fn main() {
+    let x = shown()
+    let y = util.nope()
+}

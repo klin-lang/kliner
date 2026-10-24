@@ -1,0 +1,5 @@
+let limit: i32 = 1
+fn main() {
+    for limit = 0; limit < 1; limit += 1 {
+    }
+}

@@ -1,0 +1,6 @@
+fn main() {
+  let k = 0
+  let x: u8 = match k {
+    else { 200 + 100 }
+  }
+}

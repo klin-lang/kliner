@@ -1,0 +1,3 @@
+@[link("usb_cdc_rp.c")]
+@[link("-lm")]
+fn usb_cdc_out() {}

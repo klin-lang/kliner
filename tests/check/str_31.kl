@@ -1,0 +1,4 @@
+fn main() {
+    let a = ["a", "b"]
+    let x = a[0].len
+}

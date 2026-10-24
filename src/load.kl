@@ -1,0 +1,844 @@
+// module load — the project loader (stage 4): the entry file, its
+// same-module siblings and every imported package, parsed and collected
+// into one program. A port of loadProject in Klin's lib/project.dart:
+// the same search roots, the same order of files and declarations and
+// the same errors, so the checker sees the declarations in Klin's order.
+//
+// Not supported (an error that says so): remote imports (`github/…`,
+// `gitlab/…`). The stdlib is found only through KLIN_STDLIB (Klin also
+// searches upward from the working directory and next to its binary).
+module load
+import arena
+import ast
+import diag
+import lex
+import os
+import parse
+import tab
+
+// Error code of a failed load; the error is in Prog (kind, msg).
+pub const E_LOAD: i32 = 1002
+
+const MSG: i32 = 1024
+
+// One parsed source file. Allocated once in the arena and never moved:
+// lx and ps point at d and t.
+pub struct File {
+    path: []u8 // absolute, as Klin's File(p).absolute.path
+    src: []u8
+    d: diag.Diag
+    lx: lex.Lexer
+    t: ast.Ast
+    ps: parse.Parser
+    mid: i32 // module id (index into Prog.mods)
+    rt: []i32 // checker: type id per node (resolvedType), -1 none
+    fl: []u8 // checker: flags per node (check.F_*)
+}
+
+// A top-level declaration: its file, the Decl node and the inner node
+// (Struct / Enum / Const / Global / Fn).
+pub struct Ref {
+    file: i32
+    decl: i32
+    node: i32
+}
+
+pub struct Refs {
+    r: []Ref
+    n: i32
+}
+
+pub struct Prog {
+    a: *mut arena.Arena
+    files: []*mut File
+    nf: i32
+    mods: [][]u8 // module names; id = index
+    nm: i32
+    modix: tab.Map // (name, 0) -> module id
+    structs: Refs
+    enums: Refs
+    consts: Refs
+    globals: Refs
+    funcs: Refs
+    aliases: tab.Map // (qualifier, module id) -> module id
+    first_file: i32 // Program.pos: first unit of the first package
+    first_tok: i32
+    entry: i32 // file index of the entry
+    // loader state
+    parsed: tab.Map // (abs path, 0) -> file index
+    file_mod: tab.Map // (abs path, 0) -> module id
+    loaded: tab.Map // (package key, 0) -> module id
+    loading: tab.Map // (package key, 0) -> 1 while loading, 0 after
+    roots: [][]u8 // -I dirs, then KLIN_PATH, then KLIN_STDLIB
+    nroots: i32
+    cwd: []u8
+    // the error: kind 1 = lexer / parser error in err_file (its diag),
+    // 2 = loader error at err_tok of err_file (-1: 1:1, Klin's
+    // SourcePos(1, 1)), 3 = file system error `msg: err_path`
+    kind: i32
+    err_file: i32
+    err_tok: i32
+    msg: [MSG]u8
+    mn: i32
+    err_path: []u8
+}
+
+fn alloc_refs(a: *mut arena.Arena, n: i32): ![]Ref {
+    let two: [2]Ref
+    let size = cast(i64, &two[1]) - cast(i64, &two[0])
+    let p = cast(*mut [arena.MAX_LEN]Ref, arena.alloc_addr(a, size * cast(i64, n))!)
+    return (*p)[:n]
+}
+
+fn alloc_file(a: *mut arena.Arena): !*mut File {
+    let two: [2]File
+    let size = cast(i64, &two[1]) - cast(i64, &two[0])
+    return cast(*mut File, arena.alloc_addr(a, size)!)
+}
+
+fn alloc_files(a: *mut arena.Arena, n: i32): ![]*mut File {
+    let p = cast(*mut [arena.MAX_LEN]*mut File, arena.alloc_addr(a, cast(i64, n) * 8)!)
+    return (*p)[:n]
+}
+
+fn new_refs(a: *mut arena.Arena): !Refs {
+    let mut r: Refs
+    r.r = alloc_refs(a, 64)!
+    return r
+}
+
+fn add_ref(rs: *mut Refs, a: *mut arena.Arena, file: i32, decl: i32, node: i32): !i32 {
+    if (*rs).n == (*rs).r.len {
+        let mut bigger = alloc_refs(a, (*rs).n * 2)!
+        for i in 0..<(*rs).n {
+            bigger[i] = (*rs).r[i]
+        }
+        (*rs).r = bigger
+    }
+    (*rs).r[(*rs).n].file = file
+    (*rs).r[(*rs).n].decl = decl
+    (*rs).r[(*rs).n].node = node
+    (*rs).n += 1
+    return 0
+}
+
+// ---- byte strings ----
+
+fn cat(a: *mut arena.Arena, x: []u8, y: []u8): ![]u8 {
+    let mut r = arena.alloc_u8(a, x.len + y.len)!
+    for i in 0..<x.len {
+        r[i] = x[i]
+    }
+    for i in 0..<y.len {
+        r[x.len + i] = y[i]
+    }
+    return r
+}
+
+fn cat3(a: *mut arena.Arena, x: []u8, y: []u8, z: []u8): ![]u8 {
+    return cat(a, cat(a, x, y)!, z)
+}
+
+// s with a NUL, for syscalls.
+fn z(a: *mut arena.Arena, s: []u8): ![]u8 {
+    let r = cat(a, s, b"\0")!
+    return r
+}
+
+fn ends_with(s: []u8, suf: []u8): bool {
+    if s.len < suf.len {
+        return false
+    }
+    return tab.eq(s[s.len - suf.len:s.len], suf)
+}
+
+fn starts_with(s: []u8, pre: []u8): bool {
+    return s.len >= pre.len && tab.eq(s[0:pre.len], pre)
+}
+
+fn last_slash(s: []u8): i32 {
+    let mut i = s.len - 1
+    while i >= 0 && s[i] != '/' {
+        i -= 1
+    }
+    return i
+}
+
+// Byte order (Dart compares UTF-16 units: the same for ASCII paths).
+fn less(x: []u8, y: []u8): bool {
+    let mut i = 0
+    while i < x.len && i < y.len {
+        if x[i] != y[i] {
+            return x[i] < y[i]
+        }
+        i += 1
+    }
+    return x.len < y.len
+}
+
+fn sort(ys: [][]u8) {
+    let mut xs = ys
+    for i in 1..<xs.len {
+        let v = xs[i]
+        let mut j = i - 1
+        while j >= 0 && less(v, xs[j]) {
+            xs[j + 1] = xs[j]
+            j -= 1
+        }
+        xs[j + 1] = v
+    }
+}
+
+// File(p).absolute.path: no normalization.
+fn absolute(p: *mut Prog, path: []u8): ![]u8 {
+    if path.len > 0 && path[0] == '/' {
+        return path
+    }
+    if ends_with((*p).cwd, b"/") {
+        return cat((*p).a, (*p).cwd, path)
+    }
+    return cat3((*p).a, (*p).cwd, b"/", path)
+}
+
+// File(p).parent.path
+fn parent(path: []u8): []u8 {
+    let s = last_slash(path)
+    if s <= 0 {
+        return path[0:s + 1]
+    }
+    return path[0:s]
+}
+
+// _fileStem: the name without its last extension.
+pub fn stem(path: []u8): []u8 {
+    let name = path[last_slash(path) + 1:path.len]
+    let mut d = name.len - 1
+    while d >= 0 && name[d] != '.' {
+        d -= 1
+    }
+    if d < 0 {
+        return name
+    }
+    return name[0:d]
+}
+
+// ---- errors ----
+
+fn madd(p: *mut Prog, s: []u8) {
+    for i in 0..<s.len {
+        if (*p).mn < MSG {
+            (*p).msg[(*p).mn] = s[i]
+            (*p).mn += 1
+        }
+    }
+}
+
+pub fn message(p: *mut Prog): []u8 {
+    return (*p).msg[0:(*p).mn]
+}
+
+// Starts a loader error (kind 2) at tok of file f (-1: 1:1).
+fn fail_at(p: *mut Prog, f: i32, tok: i32, msg: []u8): i32 {
+    (*p).kind = 2
+    (*p).err_file = f
+    (*p).err_tok = tok
+    (*p).mn = 0
+    madd(p, msg)
+    return E_LOAD
+}
+
+// A FileSystemException (kind 3).
+fn fail_fs(p: *mut Prog, msg: []u8, path: []u8): i32 {
+    (*p).kind = 3
+    (*p).mn = 0
+    madd(p, msg)
+    (*p).err_path = path
+    return E_LOAD
+}
+
+// ---- modules ----
+
+pub fn module_id(p: *mut Prog, name: []u8): !i32 {
+    let m = tab.get(&(*p).modix, name, 0)
+    if m >= 0 {
+        return m
+    }
+    if (*p).nm == (*p).mods.len {
+        let mut bigger = arena.alloc_slices_u8((*p).a, (*p).nm * 2)!
+        for i in 0..<(*p).nm {
+            bigger[i] = (*p).mods[i]
+        }
+        (*p).mods = bigger
+    }
+    (*p).mods[(*p).nm] = name
+    (*p).nm += 1
+    return tab.put(&(*p).modix, (*p).a, name, 0, (*p).nm - 1)
+}
+
+pub fn file(p: *mut Prog, f: i32): *mut File {
+    return (*p).files[f]
+}
+
+pub fn text(p: *mut Prog, f: i32, tok: i32): []u8 {
+    return lex.text(&(*(*p).files[f]).lx, tok)
+}
+
+// ---- parsing ----
+
+// Reads, lexes and parses path; the file index. A lexer / parser error
+// is kind 1 (the file's diag).
+fn parse_file(p: *mut Prog, path: []u8, src: []u8): !i32 {
+    let cached = tab.get(&(*p).parsed, path, 0)
+    if cached >= 0 {
+        return cached
+    }
+    let a = (*p).a
+    let f = alloc_file(a)!
+    (*f).path = path
+    (*f).src = src
+    (*f).d = diag.Diag.new(path, src)
+    (*f).lx = lex.Lexer.new(src, &(*f).d)
+    (*f).mid = -1
+    if (*p).nf == (*p).files.len {
+        let mut bigger = alloc_files(a, (*p).nf * 2)!
+        for i in 0..<(*p).nf {
+            bigger[i] = (*p).files[i]
+        }
+        (*p).files = bigger
+    }
+    let fi = (*p).nf
+    (*p).files[fi] = f
+    (*p).nf += 1
+    let nt = lex.run(&(*f).lx, a) or {
+        if err != diag.E_DIAG {
+            return error(err)
+        }
+        (*p).kind = 1
+        (*p).err_file = fi
+        return error(E_LOAD)
+    }
+    (*f).t = ast.Ast.new(a, nt)!
+    (*f).ps = parse.Parser.new(&(*f).lx, &(*f).d, &(*f).t, a)
+    let root = parse.run(&(*f).ps) or {
+        if err != diag.E_DIAG {
+            return error(err)
+        }
+        (*p).kind = 1
+        (*p).err_file = fi
+        return error(E_LOAD)
+    }
+    let ok = tab.put(&(*p).parsed, a, path, 0, fi)!
+    return fi
+}
+
+fn read(p: *mut Prog, path: []u8): ![]u8 {
+    let src = os.read_file((*p).a, z((*p).a, path)!) or {
+        return error(fail_fs(p, b"cannot read file", path))
+    }
+    return src
+}
+
+fn node(p: *mut Prog, f: i32, i: i32): ast.Node {
+    return (*(*p).files[f]).t.nodes[i]
+}
+
+fn unit_list(p: *mut Prog, f: i32): i32 {
+    let fp = (*p).files[f]
+    return (*fp).t.nodes[(*fp).t.root].extra
+}
+
+// Module name: the `module` declaration or the file stem.
+fn module_name(p: *mut Prog, f: i32): []u8 {
+    let fp = (*p).files[f]
+    let u = (*fp).t.nodes[(*fp).t.root]
+    if u.a >= 0 {
+        return lex.text(&(*fp).lx, u.a)
+    }
+    return stem((*fp).path)
+}
+
+// ModuleUnit.pos: the keyword of the first struct, else enum, const,
+// global, function.
+fn unit_pos(p: *mut Prog, f: i32): i32 {
+    let fp = (*p).files[f]
+    let l = unit_list(p, f)
+    let kinds: [5]ast.Nk = [ast.Nk.Struct, ast.Nk.Enum, ast.Nk.Const, ast.Nk.Global, ast.Nk.Fn]
+    for k in 0..<5 {
+        for j in 0..<ast.count(&(*fp).t, l) {
+            let d = node(p, f, ast.item(&(*fp).t, l, j))
+            if d.kind == ast.Nk.Decl && node(p, f, d.a).kind == kinds[k] {
+                return node(p, f, d.a).tok
+            }
+        }
+    }
+    return -1
+}
+
+// ---- import resolution ----
+
+// _packageKlFiles: absolute paths of the `.kl` files of dir (not
+// `*_test.kl`), sorted; empty when dir is not a directory.
+fn package_files(p: *mut Prog, dir: []u8): ![][]u8 {
+    let a = (*p).a
+    let names = os.list_files(a, z(a, dir)!) or {
+        let none = arena.alloc_slices_u8(a, 0)!
+        return none
+    }
+    let mut out = arena.alloc_slices_u8(a, names.len)!
+    let mut n = 0
+    let abs = absolute(p, dir)!
+    for i in 0..<names.len {
+        let name = names[i]
+        if ends_with(name, b".kl") && !ends_with(name, b"_test.kl") {
+            out[n] = cat3(a, abs, b"/", name)!
+            n += 1
+        }
+    }
+    let r = out[0:n]
+    sort(r)
+    return r
+}
+
+fn trim(s: []u8): []u8 {
+    let mut i = 0
+    let mut j = s.len
+    while i < j && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == 13) {
+        i += 1
+    }
+    while j > i && (s[j - 1] == ' ' || s[j - 1] == '\t' || s[j - 1] == '\n' || s[j - 1] == 13) {
+        j -= 1
+    }
+    return s[i:j]
+}
+
+fn add_root(p: *mut Prog, dir: []u8): !i32 {
+    if (*p).nroots == (*p).roots.len {
+        let mut bigger = arena.alloc_slices_u8((*p).a, (*p).nroots * 2)!
+        for i in 0..<(*p).nroots {
+            bigger[i] = (*p).roots[i]
+        }
+        (*p).roots = bigger
+    }
+    (*p).roots[(*p).nroots] = dir
+    (*p).nroots += 1
+    return 0
+}
+
+// isRemoteImportPath
+fn is_remote(key: []u8): bool {
+    let s = last_slash(key)
+    let mut first = -1
+    for i in 0..<key.len {
+        if first < 0 && key[i] == '/' {
+            first = i
+        }
+    }
+    if first <= 0 || s < 0 {
+        return false
+    }
+    let host = key[0:first]
+    return tab.eq(host, b"github") || tab.eq(host, b"gitlab")
+}
+
+// Loads the package an import names (file or directory); its module id.
+fn load_import(p: *mut Prog, from_dir: []u8, key: []u8, def_q: []u8): !i32 {
+    let a = (*p).a
+    if is_remote(key) {
+        return error(fail_fs(p, b"remote imports are not supported by Kliner yet", key))
+    }
+    let n = (*p).nroots + 2
+    for r in 0..<n {
+        let mut root = from_dir
+        if r == 1 {
+            root = cat(a, from_dir, b"/lib")!
+        } else if r >= 2 {
+            root = (*p).roots[r - 2]
+        }
+        let file_path = cat3(a, root, b"/", cat(a, key, b".kl")!)!
+        let dir_path = cat3(a, root, b"/", key)!
+        let has_file = os.is_file(z(a, file_path)!)
+        let dir_files = package_files(p, dir_path)!
+        if has_file && dir_files.len > 0 {
+            (*p).kind = 3
+            (*p).mn = 0
+            madd(p, b"ambiguous import `")
+            madd(p, key)
+            madd(p, b"`: both `")
+            madd(p, file_path)
+            madd(p, b"` and package directory `")
+            madd(p, dir_path)
+            madd(p, b"` exist")
+            (*p).err_path = file_path
+            return error(E_LOAD)
+        }
+        if has_file {
+            let mut one = arena.alloc_slices_u8(a, 1)!
+            one[0] = absolute(p, file_path)!
+            return load_package(p, one, b"", false)
+        }
+        if dir_files.len > 0 {
+            return load_package(p, dir_files, def_q, true)
+        }
+    }
+    return error(fail_fs(p, b"imported file not found", cat3(a, from_dir, b"/", cat(a, key, b".kl")!)!))
+}
+
+// ImportSpec of an Import node: [spec (resolution key), qualifier,
+// default qualifier]; spec without a trailing `.kl`.
+struct Names {
+    spec: []u8
+    q: []u8
+    dq: []u8
+}
+
+fn import_names(p: *mut Prog, f: i32, imp: ast.Node): !Names {
+    let fp = (*p).files[f]
+    let mut spec = lex.text(&(*fp).lx, imp.a)
+    if (*fp).lx.toks[imp.a].kind == lex.Tok.Str {
+        spec = lex.str_value(&(*fp).lx, (*p).a, imp.a)!
+    }
+    if ends_with(spec, b".kl") {
+        spec = spec[0:spec.len - 3]
+    }
+    let dq = spec[last_slash(spec) + 1:spec.len]
+    let mut q = dq
+    if imp.b >= 0 {
+        q = lex.text(&(*fp).lx, imp.b)
+    }
+    let mut r: Names
+    r.spec = spec
+    r.q = q
+    r.dq = dq
+    return r
+}
+
+// loadPackageFiles: paths are absolute. required: the package
+// directory's name must be the module name.
+fn load_package(p: *mut Prog, files: [][]u8, required: []u8, has_required: bool): !i32 {
+    let a = (*p).a
+    let mut ok = 0
+    sort(files)
+    if files.len == 0 {
+        return error(fail_fs(p, b"imported package has no .kl files", b""))
+    }
+    let mut known = 0
+    for i in 0..<files.len {
+        if tab.has(&(*p).file_mod, files[i], 0) {
+            known += 1
+        }
+    }
+    if known == files.len {
+        let m = tab.get(&(*p).file_mod, files[0], 0)
+        for i in 0..<files.len {
+            let mi = tab.get(&(*p).file_mod, files[i], 0)
+            if mi != m {
+                (*p).kind = 2
+                (*p).err_file = (*p).entry
+                (*p).err_tok = -1
+                (*p).mn = 0
+                madd(p, b"file `")
+                madd(p, files[i])
+                madd(p, b"` already loaded as module `")
+                madd(p, (*p).mods[mi])
+                madd(p, b"`")
+                return error(E_LOAD)
+            }
+        }
+        return m
+    }
+    if known > 0 {
+        for i in 0..<files.len {
+            if tab.has(&(*p).file_mod, files[i], 0) {
+                (*p).kind = 2
+                (*p).err_file = (*p).entry
+                (*p).err_tok = -1
+                (*p).mn = 0
+                madd(p, b"file `")
+                madd(p, files[i])
+                madd(p, b"` already loaded as part of another package")
+                return error(E_LOAD)
+            }
+        }
+    }
+    let mut rs: [1]u8 = [0x1e]
+    let mut key = files[0]
+    for i in 1..<files.len {
+        key = cat3(a, key, rs[:], files[i])!
+    }
+    let existing = tab.get(&(*p).loaded, key, 0)
+    if existing >= 0 {
+        return existing
+    }
+    if tab.get(&(*p).loading, key, 0) == 1 {
+        (*p).kind = 2
+        (*p).err_file = (*p).entry
+        (*p).err_tok = -1
+        (*p).mn = 0
+        madd(p, b"cyclic import `")
+        madd(p, key)
+        madd(p, b"`")
+        return error(E_LOAD)
+    }
+    ok = tab.put(&(*p).loading, a, key, 0, 1)!
+
+    let mut units = arena.alloc_i32(a, files.len)!
+    for i in 0..<files.len {
+        if !os.is_file(z(a, files[i])!) {
+            return error(fail_fs(p, b"imported file not found", files[i]))
+        }
+        let f = parse_file(p, files[i], read(p, files[i])!)!
+        units[i] = f
+        let name = module_name(p, f)
+        if has_required && !tab.eq(name, required) {
+            (*p).mn = 0
+            madd(p, b"module `")
+            madd(p, name)
+            madd(p, b"` in `")
+            madd(p, files[i])
+            madd(p, b"` does not match package `")
+            madd(p, required)
+            madd(p, b"`")
+            (*p).kind = 2
+            (*p).err_file = f
+            (*p).err_tok = unit_pos(p, f)
+            return error(E_LOAD)
+        }
+    }
+    let mname = module_name(p, units[0])
+    for i in 0..<files.len {
+        let name = module_name(p, units[i])
+        if !tab.eq(name, mname) {
+            (*p).mn = 0
+            madd(p, b"mixed module names in package (`")
+            madd(p, mname)
+            madd(p, b"` vs `")
+            madd(p, name)
+            madd(p, b"`)")
+            (*p).kind = 2
+            (*p).err_file = units[i]
+            (*p).err_tok = unit_pos(p, units[i])
+            return error(E_LOAD)
+        }
+    }
+    let m = module_id(p, mname)!
+    if (*p).first_file < 0 {
+        (*p).first_file = units[0]
+        (*p).first_tok = unit_pos(p, units[0])
+    }
+    let kinds: [5]ast.Nk = [ast.Nk.Struct, ast.Nk.Enum, ast.Nk.Const, ast.Nk.Global, ast.Nk.Fn]
+    for i in 0..<files.len {
+        let f = units[i]
+        let fp = (*p).files[f]
+        (*fp).mid = m
+        let l = unit_list(p, f)
+        for k in 0..<5 {
+            for j in 0..<ast.count(&(*fp).t, l) {
+                let di = ast.item(&(*fp).t, l, j)
+                let d = node(p, f, di)
+                if d.kind == ast.Nk.Decl && node(p, f, d.a).kind == kinds[k] {
+                    match k {
+                        0 { ok = add_ref(&(*p).structs, a, f, di, d.a)! }
+                        1 { ok = add_ref(&(*p).enums, a, f, di, d.a)! }
+                        2 { ok = add_ref(&(*p).consts, a, f, di, d.a)! }
+                        3 { ok = add_ref(&(*p).globals, a, f, di, d.a)! }
+                        else { ok = add_ref(&(*p).funcs, a, f, di, d.a)! }
+                    }
+                }
+            }
+        }
+    }
+    for i in 0..<files.len {
+        ok = tab.put(&(*p).file_mod, a, files[i], 0, m)!
+    }
+    ok = tab.put(&(*p).loaded, a, key, 0, m)!
+
+    // byQualifier: qualifier -> (file, Import node), in first-seen order
+    let mut qn = 0
+    for i in 0..<files.len {
+        let fp = (*p).files[units[i]]
+        let l = unit_list(p, units[i])
+        for j in 0..<ast.count(&(*fp).t, l) {
+            if node(p, units[i], ast.item(&(*fp).t, l, j)).kind == ast.Nk.Import {
+                qn += 1
+            }
+        }
+    }
+    let mut qs = arena.alloc_slices_u8(a, qn)!
+    let mut keys = arena.alloc_slices_u8(a, qn)!
+    let mut dqs = arena.alloc_slices_u8(a, qn)!
+    let mut nq = 0
+    let mut byq = tab.Map.new(a)!
+    for i in 0..<files.len {
+        let f = units[i]
+        let fp = (*p).files[f]
+        let l = unit_list(p, f)
+        for j in 0..<ast.count(&(*fp).t, l) {
+            let imp = node(p, f, ast.item(&(*fp).t, l, j))
+            if imp.kind == ast.Nk.Import {
+                let nm = import_names(p, f, imp)!
+                let spec = nm.spec
+                let q = nm.q
+                let dq = nm.dq
+                let e = tab.get(&byq, q, 0)
+                if e >= 0 && !tab.eq(keys[e], spec) {
+                    (*p).mn = 0
+                    madd(p, b"import alias `")
+                    madd(p, q)
+                    madd(p, b"` is already bound to `")
+                    madd(p, keys[e])
+                    madd(p, b"`")
+                    (*p).kind = 2
+                    (*p).err_file = f
+                    (*p).err_tok = imp.tok
+                    return error(E_LOAD)
+                }
+                if e >= 0 {
+                    keys[e] = spec
+                    dqs[e] = dq
+                } else {
+                    qs[nq] = q
+                    keys[nq] = spec
+                    dqs[nq] = dq
+                    ok = tab.put(&byq, a, q, 0, nq)!
+                    nq += 1
+                }
+            }
+        }
+    }
+    // sorted by qualifier
+    let mut order = arena.alloc_slices_u8(a, nq)!
+    for i in 0..<nq {
+        order[i] = qs[i]
+    }
+    sort(order)
+    let from_dir = parent(files[0])
+    for i in 0..<nq {
+        let e = tab.get(&byq, order[i], 0)
+        let child = load_import(p, from_dir, keys[e], dqs[e])!
+        ok = tab.put(&(*p).aliases, a, order[i], m, child)!
+    }
+    ok = tab.put(&(*p).loading, a, key, 0, 0)!
+    return m
+}
+
+// `(?:^|\n)\s*module\s+NAME\b` on raw source.
+fn declares_module(src: []u8, name: []u8): bool {
+    for st in 0..<src.len {
+        if st == 0 || src[st - 1] == '\n' {
+            let mut i = st
+            while i < src.len && is_space(src[i]) {
+                i += 1
+            }
+            if i + 6 <= src.len && tab.eq(src[i:i + 6], b"module") {
+                i += 6
+                let ws = i
+                while i < src.len && is_space(src[i]) {
+                    i += 1
+                }
+                if i > ws && i + name.len <= src.len && tab.eq(src[i:i + name.len], name) {
+                    let e = i + name.len
+                    if e == src.len || !is_word(src[e]) {
+                        return true
+                    }
+                }
+            }
+        }
+    }
+    return false
+}
+
+fn is_space(c: u8): bool {
+    return c == ' ' || c == '\t' || c == '\n' || c == 13 || c == 11 || c == 12
+}
+
+fn is_word(c: u8): bool {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_'
+}
+
+// Splits a `:`-separated list into roots (trimmed, empty parts dropped).
+fn add_path_list(p: *mut Prog, s: []u8): !i32 {
+    let mut ok = 0
+    let mut st = 0
+    for i in 0..<s.len + 1 {
+        if i == s.len || s[i] == ':' {
+            let part = trim(s[st:i])
+            if part.len > 0 {
+                ok = add_root(p, part)!
+            }
+            st = i + 1
+        }
+    }
+    return 0
+}
+
+pub fn Prog.new(a: *mut arena.Arena): !Prog {
+    let mut p: Prog
+    p.a = a
+    p.files = alloc_files(a, 16)!
+    p.mods = arena.alloc_slices_u8(a, 16)!
+    p.modix = tab.Map.new(a)!
+    p.structs = new_refs(a)!
+    p.enums = new_refs(a)!
+    p.consts = new_refs(a)!
+    p.globals = new_refs(a)!
+    p.funcs = new_refs(a)!
+    p.aliases = tab.Map.new(a)!
+    p.parsed = tab.Map.new(a)!
+    p.file_mod = tab.Map.new(a)!
+    p.loaded = tab.Map.new(a)!
+    p.loading = tab.Map.new(a)!
+    p.roots = arena.alloc_slices_u8(a, 8)!
+    p.first_file = -1
+    p.first_tok = -1
+    p.entry = -1
+    p.err_file = -1
+    p.err_tok = -1
+    return p
+}
+
+// Search root from `-I dir` (before KLIN_PATH and KLIN_STDLIB).
+pub fn include(p: *mut Prog, dir: []u8): !i32 {
+    return add_root(p, dir)
+}
+
+// loadProject(entry).
+pub fn run(p: *mut Prog, entry_path: []u8): !i32 {
+    let a = (*p).a
+    let mut ok = 0
+    (*p).cwd = os.getcwd(a)!
+    ok = add_path_list(p, os.getenv(a, b"KLIN_PATH")!)!
+    let std = os.getenv(a, b"KLIN_STDLIB")!
+    if std.len > 0 {
+        ok = add_root(p, std)!
+    }
+    let entry_abs = absolute(p, entry_path)!
+    let src = read(p, entry_abs)!
+    let ef = parse_file(p, entry_abs, src)!
+    (*p).entry = ef
+    let em = module_name(p, ef)
+    let entry_dir = parent(entry_abs)
+    let all = package_files(p, entry_dir)!
+    let mut sibs = arena.alloc_slices_u8(a, all.len + 1)!
+    sibs[0] = entry_abs
+    let mut ns = 1
+    for i in 0..<all.len {
+        let path = all[i]
+        if !tab.eq(path, entry_abs) {
+            let raw = read(p, path)!
+            let looks = tab.eq(stem(path), em) || declares_module(raw, em)
+            let f = parse_file(p, path, raw) or {
+                if err != E_LOAD || (*p).kind != 1 || looks {
+                    return error(err)
+                }
+                (*p).kind = 0
+                cast(i32, -1)
+            }
+            if f >= 0 && tab.eq(module_name(p, f), em) {
+                sibs[ns] = path
+                ns += 1
+            }
+        }
+    }
+    let m = load_package(p, sibs[0:ns], b"", false)!
+    return m
+}

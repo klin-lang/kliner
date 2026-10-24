@@ -1,0 +1,2 @@
+fn take(n: u8) {}
+fn main() { take(200 + 100) }

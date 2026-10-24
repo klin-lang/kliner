@@ -1,0 +1,2 @@
+enum E: u8 { A = 300 }
+fn main() {}

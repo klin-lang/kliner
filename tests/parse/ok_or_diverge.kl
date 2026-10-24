@@ -1,0 +1,11 @@
+fn f(k: i32): !i32 {
+    x := g() or { return }
+    y := g() or { match k { 1 { 0 } else { 1 } } }
+    z := g() or { match k { 1 { return 0 } else { return 1 } } }
+    w := g() or {
+        match k { 1 { h() } else { h() } }
+        break
+    }
+    v := g() or { continue }
+    return 0
+}

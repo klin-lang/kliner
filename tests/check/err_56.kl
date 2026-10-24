@@ -1,0 +1,6 @@
+fn main() {
+    let a = [1, 2, 3]
+    let mut b: [3]i32 = a
+    b[0] = 1
+    let {x} = a
+}

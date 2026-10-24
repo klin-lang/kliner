@@ -1,0 +1,2 @@
+module osa
+pub fn answer(): i32 { return 9 }

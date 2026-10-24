@@ -1,0 +1,10 @@
+struct S {
+    n: i32
+}
+fn S.inc(mut s: S) {
+    s.n += 1
+}
+fn main() {
+    let s = S{n: 0}
+    s.inc()
+}

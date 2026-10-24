@@ -1,0 +1,10 @@
+struct Inner {
+  x: i32
+}
+struct Outer {
+  inner: Inner
+}
+fn main() {
+  let o = Outer{ inner: Inner{ x: 1 } }
+  o.inner.x = 5
+}

@@ -1,0 +1,2 @@
+const F: bool = 1
+fn main() {}

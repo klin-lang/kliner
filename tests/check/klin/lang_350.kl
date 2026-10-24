@@ -1,0 +1,5 @@
+enum Hi: u8 { A = 255 }
+enum Next: u8 { A = 254, B }
+enum Signed: i8 { A = 126, B }
+enum Restart: u8 { A = 255, B = 0 }
+fn main() {}

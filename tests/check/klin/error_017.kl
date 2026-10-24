@@ -1,0 +1,4 @@
+fn main() {
+  let xs: [2]i32 = [1, 2]
+  let [_, _] = xs
+}

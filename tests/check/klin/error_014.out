@@ -1,0 +1,1 @@
+3:16: array destructuring requires a fixed-length array `[N]T`, got `i32`

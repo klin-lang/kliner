@@ -1,0 +1,5 @@
+let g: i32 = 1
+fn main() {
+    for g = 0; g < 2; g += 1 {
+    }
+}

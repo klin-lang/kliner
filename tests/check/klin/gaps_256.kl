@@ -1,0 +1,4 @@
+fn main() {
+  let s = "ab"
+  s.len = 1
+}

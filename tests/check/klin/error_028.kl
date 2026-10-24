@@ -1,0 +1,6 @@
+fn main() {
+  match 1 {
+    1 when 2 { puts("x") }
+    else { puts("y") }
+  }
+}

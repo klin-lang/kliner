@@ -1,0 +1,3 @@
+const A: i32 = 1
+const B: u8 = A
+fn main() {}

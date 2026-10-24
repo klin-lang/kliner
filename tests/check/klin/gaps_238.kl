@@ -1,0 +1,14 @@
+fn g(): !i32 { return 1 }
+fn f(): i32 {
+  let n = g() or { return 4 }
+  return n
+}
+fn h(): !i32 {
+  let n = g() or { return error(err) }
+  return n
+}
+fn k(): !i32 {
+  let n = g()!
+  return n + 1
+}
+fn main() {}

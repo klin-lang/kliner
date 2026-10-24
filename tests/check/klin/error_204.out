@@ -1,0 +1,1 @@
+4:12: indexing requires an array, slice, or `str`, got `*mut [2]i32`

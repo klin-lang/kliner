@@ -1,0 +1,1 @@
+4:12: a slice range requires an array or slice, got `*mut [2]i32`

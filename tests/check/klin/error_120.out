@@ -1,0 +1,1 @@
+1:23: enum variant `B` value 256 is out of range for `u8` (0..=255)

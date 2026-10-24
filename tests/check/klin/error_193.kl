@@ -1,0 +1,7 @@
+fn main() {
+  let k = 0
+  let x: u8 = match k {
+    0 { 1 }
+    else { error(1) }
+  } or { 300 }
+}

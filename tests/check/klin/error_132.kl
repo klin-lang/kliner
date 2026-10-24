@@ -1,0 +1,2 @@
+const X: u8 = 200 + 100
+fn main() {}

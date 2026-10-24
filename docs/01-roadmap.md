@@ -1,9 +1,9 @@
 # Kliner — roadmap
 
 Stages in order. Decisions behind them: [00-decisions.md](00-decisions.md).
-Status: **stage 3 — parser (`src/parse.kl`) done; lexer (`src/lex.kl`, stage 2) and runtime (`rt/`, stage 1). All built by Klin.**
+Status: **stage 4 — checker (`src/check/`) done; parser (`src/parse.kl`, stage 3), lexer (`src/lex.kl`, stage 2) and runtime (`rt/`, stage 1). All built by Klin (main `a66ffbd`).**
 
-Numbering: the frontend used to be one stage (2: lexer, parser,
+Numbering (**DECIDED 2026-10-24**, [C11.5](02-core-subset.md#c11-stage-3-review--decided-2026-10-24)): the frontend used to be one stage (2: lexer, parser,
 checker). It is now split so that each stage ends in one tested
 piece: 2 lexer, 3 parser, 4 checker; the later stages moved by two
 (IR was 3, now 5; backend 4 → 6; fuller language 5 → 7; self-hosting
@@ -39,17 +39,18 @@ Proposal: [02-core-subset.md](02-core-subset.md).
   `.kl` files of Kliner and Klin except the known differences
   ([tests/parse/README.md](../tests/parse/README.md))
 - [x] Built by current Klin
-- [ ] String interpolation `"…$x…"` — rejected with a clear error;
-  options in [02-core-subset.md C10](02-core-subset.md#c10-fn-and-string-interpolation--proposed)
+- [x] String interpolation `"…$x…"` — rejected with a clear error; stays
+  out of Kliner for now ([C10, DECIDED](02-core-subset.md#c10-fn-and-string-interpolation--decided-2026-10-24))
 
 ## 4. Frontend in Klin: checker
 
-- [ ] Checker (types)
-- [ ] `$fn` generics (Klin expands `$fn` / `$name(…)` before lexing; the
-  lexer rejects `$` like Klin's does — needs a pre-pass or a `$` token;
-  options in [02-core-subset.md C10](02-core-subset.md#c10-fn-and-string-interpolation--proposed))
-- [ ] Built by current Klin
-- [ ] Compared against the Dart compiler on the same inputs
+- [x] Checker — `src/check/` (names, module imports, types), loader
+  `src/load.kl`, types `src/types.kl` ([04-checker.md](04-checker.md))
+- [x] `$fn` generics — not in Kliner for now; the lexer rejects `$` like
+  Klin's raw lexer ([C10, DECIDED](02-core-subset.md#c10-fn-and-string-interpolation--decided-2026-10-24))
+- [x] Built by current Klin
+- [x] Compared against Klin's checker on the same inputs (`tools/kliner-check`
+  vs `tools/klin-check.dart`; differences: [04-checker.md](04-checker.md#known-differences-from-klin))
 
 ## 5. IR + IR interpreter
 

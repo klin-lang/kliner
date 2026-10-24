@@ -1,0 +1,5 @@
+struct Point { x, y: i32 }
+fn Point.new(x, y: i32): Point { return Point{ x: x, y: y } }
+fn main() {
+  let p: Point = Point.new(1)
+}

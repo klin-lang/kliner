@@ -1,0 +1,1 @@
+5:5: field `a` needs `err_43.A` to be complete (it contains an array of that struct)

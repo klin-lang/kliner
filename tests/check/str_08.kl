@@ -1,0 +1,5 @@
+fn main() {
+    let s = "abc"
+    let b = cstr_u8(s)
+    let n = b.len
+}

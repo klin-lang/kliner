@@ -1,0 +1,5 @@
+const A: i32 = 1
+const B: i64 = 2
+fn main() {
+  let buf: [A + B]u8
+}

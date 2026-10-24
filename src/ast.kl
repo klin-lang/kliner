@@ -139,7 +139,8 @@ pub enum Nk: u8 {
     Await
     // tok = `or`, a = operand, b = OrBlock
     Or
-    // tok = `{`, a = final value, extra = list(statements)
+    // tok = `{`, a = final value or -1 (diverging block, D21),
+    // extra = list(statements)
     OrBlock
     // tok = `match`, a = subject, extra = list(Arm)  (expression arms)
     MatchE

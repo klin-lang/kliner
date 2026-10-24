@@ -1,0 +1,1 @@
+2:1: `cexport` cannot be applied to `main` (entry point is always emitted as C `main`)

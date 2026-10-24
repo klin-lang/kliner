@@ -1,0 +1,11 @@
+enum E: u8 {
+    A
+    B
+}
+fn main() {
+    let e = E.A
+    let n = match e {
+        E.A { 1 }
+        E.B { true }
+    }
+}

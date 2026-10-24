@@ -1,0 +1,1 @@
+2:12: field `a` needs `error_206.A` to be complete (it contains an array of that struct)

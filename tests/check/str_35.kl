@@ -1,0 +1,5 @@
+fn main() {
+    let s = "a"
+    let c = s[0] + 1
+    let ok = s[0] == 97
+}

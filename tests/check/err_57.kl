@@ -1,0 +1,9 @@
+struct P {
+    x: i32
+}
+fn main() {
+    let mut p = P{x: 1}
+    let mut q = 0
+    {x: q} = p
+    {y: q} = p
+}

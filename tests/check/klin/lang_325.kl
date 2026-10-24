@@ -1,0 +1,8 @@
+struct P {
+  x: i32
+}
+fn main() {
+  let mut q = P{ x: 0 }
+  let p: *mut P = &q
+  (*p).x = 7
+}

@@ -1,0 +1,22 @@
+struct P {
+    x: i32
+    y: i32
+}
+fn f(): !i32 {
+    return 1
+}
+fn main(): i32 {
+    let p = P{x: 1, y: 2}
+    let {x, y} = p
+    let v = f() or {
+        return 1
+    }
+    for i := 0; i < 3; i += 1 {
+        if i == 2 {
+            break
+        }
+    }
+    let a = [1, 2, 3]
+    let s = a[:]
+    return x + y + v + cast(i32, s.len)
+}

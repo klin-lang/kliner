@@ -1,0 +1,6 @@
+struct Fut { done: i32 }
+fn (mut f: Fut) poll(): i32 { return 1 }
+fn main() {
+  let mut f = Fut{ done: 1 }
+  f.await
+}

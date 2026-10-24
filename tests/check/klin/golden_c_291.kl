@@ -1,0 +1,2 @@
+@[link("usb_stub.c")]
+fn main() {}

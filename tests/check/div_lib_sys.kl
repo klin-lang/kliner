@@ -1,0 +1,2 @@
+module sys
+pub fn write(fd: i32, p: *u8, n: i64): i64

@@ -1,0 +1,4 @@
+fn main() {
+    let s = "abc"
+    let mut b: []u8 = cstr_u8(s)
+}

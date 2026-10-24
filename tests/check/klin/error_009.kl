@@ -1,0 +1,6 @@
+struct Box { data: [3]i32
+ n: i32 }
+fn main() {
+  let b = Box{ data: [1, 2, 3], n: 3 }
+  let { data, n } = b
+}

@@ -1,0 +1,2 @@
+@[cexport, codename("not_really_main")]
+fn main() {}

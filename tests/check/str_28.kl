@@ -1,0 +1,5 @@
+fn main() {
+    puts("hi")
+    let s = "x"
+    printf("%s", s)
+}

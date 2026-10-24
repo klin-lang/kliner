@@ -1,0 +1,14 @@
+struct Inner {
+  x: i32
+}
+struct Mid {
+  inner: Inner
+}
+struct Outer {
+  mid: Mid
+}
+@[cexport, codename("klin_take_outer")]
+fn take_outer(o: Outer): i32 {
+  return o.mid.inner.x
+}
+fn main() {}

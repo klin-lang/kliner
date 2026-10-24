@@ -1,0 +1,6 @@
+let mut g: i32 = 0
+let h: i32 = 1
+fn main() {
+    g = 2
+    h = 3
+}

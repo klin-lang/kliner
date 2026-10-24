@@ -1,0 +1,8 @@
+import util
+fn main() {
+    let c = util.Color.Red
+    match c {
+        util.Color.Red {
+        }
+    }
+}

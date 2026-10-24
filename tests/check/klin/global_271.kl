@@ -1,0 +1,3 @@
+let mut inc: i32 = 1
+fn inc(): i32 { return inc }
+fn main() {}

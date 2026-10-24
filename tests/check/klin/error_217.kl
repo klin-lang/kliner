@@ -1,0 +1,7 @@
+struct Holder { cb: fn(i32): i32 }
+fn inc(x: i32): i32 { return x }
+fn (h: Holder) cb(x: i32): i32 { return x }
+fn main() {
+  let h = Holder{ cb: inc }
+  h.cb(1)
+}

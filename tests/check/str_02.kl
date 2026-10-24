@@ -1,0 +1,4 @@
+fn main(args: []str): i32 {
+    let s = args[0]
+    return s.len
+}

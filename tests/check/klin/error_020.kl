@@ -1,0 +1,6 @@
+fn fallible(): !i32 { return error(1) }
+fn main() {
+  let mut a: i32 = 1
+  let mut b: i32 = 2
+  a, b = fallible()!, 3
+}

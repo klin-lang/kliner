@@ -1,0 +1,14 @@
+fn g(): !i32 { return error(1) }
+fn f(): i32 {
+  let mut i = 0
+  while i < 2 {
+    let n = g() or { break }
+    i = n
+  }
+  while i < 2 {
+    let n = g() or { continue }
+    return n
+  }
+  return 0
+}
+fn main() {}

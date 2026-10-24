@@ -1,0 +1,4 @@
+let kw: []u8 = b"fn"
+fn main() {
+  let mut w = kw
+}

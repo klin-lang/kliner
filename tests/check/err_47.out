@@ -1,0 +1,1 @@
+2:13: operator `!` requires type `bool`, got `untyped int`

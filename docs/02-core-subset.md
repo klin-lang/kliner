@@ -26,6 +26,8 @@ runtime API) are **DECIDED (2026-10-23)** — see
 [C8](#c8-review-decisions--decided-2026-10-23). Questions opened by the
 sync with Klin main are in
 [C9](#c9-sync-with-klin-main--proposed) (**PROPOSED**, Marek decides).
+The stage 3 review (C10, the AST model, the roadmap numbering) is
+**DECIDED (2026-10-24)** — see [C11](#c11-stage-3-review--decided-2026-10-24).
 
 The Klin changes the compiler source relies on are **merged into Klin
 main**: [#351](https://github.com/klin-lang/klin/pull/351) to
@@ -108,7 +110,7 @@ fastest and simplest:
 This is the Zig / Carbon "data-oriented AST" layout. It also makes
 stage2 == stage3 easier: no pointer values end up in output.
 
-### AST — PROPOSED
+### AST — DECIDED (2026-10-24, C11.2)
 
 The stage 3 parser follows the data model above (`src/ast.kl`):
 
@@ -123,7 +125,7 @@ The stage 3 parser follows the data model above (`src/ast.kl`):
   (`Call`, `ForC`, `Let`) would need an extra list. Names are never
   copied: a name is the text of its token. Alternative: no `tok`, the
   position in `a` where needed — smaller nodes (20 instead of 24
-  bytes), more irregular layouts. Suggestion: keep `tok`.
+  bytes), more irregular layouts. **Decided: keep `tok`** (C11.2).
 - Types are nodes (`TName`, `TPtr`, `TSlice`, `TArray`, `TErr`,
   `TFn`); an array length keeps its token range for the checker.
 - A declaration is wrapped in `Decl` (attributes, `pub`, `async`).
@@ -197,12 +199,17 @@ The "was" column is the result on `757b782`.
 | — | `[65, 66]` as `[2]u8` initializer | typed as `[2]i32` | Takes the element type from context (D12) | #353 `b7e8894` |
 | — | `const X: u8 = 300`, `let x: i64 = -1`, `1 << 40` as `i64` | silent wrap; `-1` / `~7` / `1 << 40` are `i32` | Range error; unary `-` / `~` and constant expressions take the expected type (D12; C8.2, C8.3) | #352 `eccb0e1`, #353 `b7e8894`, #354 `db6bd2e` |
 
-Still open on Klin main (probed on `d7625f1`), none blocking:
+Still open on Klin main (probed on `d7625f1`, updated for `a66ffbd`), none blocking:
 
-- A free `fn` inside a `$fn` body is declared once per expansion →
-  `redeclaration of function` on the second expansion (use methods).
-- An `or { }` block must end in a value (`or { return }` is an error).
-- `str` cannot be measured, indexed or cast to an integer (C9.2).
+- ~~An `or { }` block must end in a value (`or { return }` is an
+  error).~~ Fixed in #359 `a66ffbd` (D21: `or { return … }`, `break`,
+  `continue`); the checker uses it.
+- ~~A free `fn` inside a `$fn` body is declared once per expansion
+  (`redeclaration of function`).~~ Fixed in #359 (D20: unique helper
+  names per expansion).
+- `str` cannot be cast to an integer; since #359 (D22) it has
+  `s.len`, `s[i]` and `cstr_u8(s)`. Kliner's checker supports `str`
+  since stage 4 (C12.3); compiler code still uses `[]u8`.
 - `b"…"` reaching a mutable binding through a parameter or a return is
   still UB (C8.1).
 
@@ -376,9 +383,10 @@ Not Klin source. A few instructions generated per target:
 
 v0 reads arguments from **`/proc/self/cmdline`** (NUL-separated) in
 `os.args` (C7.4) — identical in both stages, no backend magic. Klin main
-now has `fn main(args: []str)` (G10, D18), but its elements are `str`
-(no `.len`, no indexing, no cast), so using it needs one more runtime
-function; that option is C9.2 (PROPOSED). Later, `_start` passes
+now has `fn main(args: []str)` (G10, D18); since D22 its `str`
+elements can be read with `s.len`, `s[i]` and `cstr_u8(s)`, and Kliner
+checks them (C12.3). Switching to it is the option in C9.2 / C12.4;
+v0 keeps `/proc` (C7.4). Later, `_start` passes
 `argc` / `argv` and the `/proc` dependency goes away.
 
 ### Errors: errno → `!T`
@@ -672,12 +680,11 @@ changes C7 until he decides.
    - Suggestion: (a) for v0; reconsider (b) when the backend has a data
      section anyway.
 2. **Arguments via `fn main(args: []str)`** (#355, D18) instead of
-   `/proc/self/cmdline` (C7.4). Probed: `args.len` is `argc`, but a
-   `str` element has no `.len`, no indexing and no `cast` to an integer,
-   so core Klin cannot read its bytes. It needs one runtime function,
-   e.g. `sys.cstr_u8(s: str): []u8` (bootstrap: `strlen` in the shim;
-   Kliner: intrinsic), and Kliner must accept `str` in the `main`
-   signature. Gain: no `/proc` dependency, the same source in both
+   `/proc/self/cmdline` (C7.4). Probed on `824e4af`: `args.len` is
+   `argc`, but a `str` element had no `.len` and no indexing. *Update
+   (`a66ffbd`, D22):* `s.len`, `s[i]` and the builtin `cstr_u8(s)` exist
+   and Kliner accepts `str` and `main(args: []str)` (C12.3), so no shim
+   function is needed any more — see C12.4. Gain: no `/proc` dependency, the same source in both
    stages once `_start` passes `argc` / `argv`. Suggestion: keep
    `/proc/self/cmdline` in v0; switch together with `_start` passing
    the arguments.
@@ -690,9 +697,14 @@ changes C7 until he decides.
 
 ---
 
-## C10. `$fn` and string interpolation — PROPOSED
+## C10. `$fn` and string interpolation — DECIDED (2026-10-24)
 
-Stage 3 parses Klin without these two features; Marek decides later.
+**Decided (Marek, 2026-10-24): both stay out of Kliner for now** —
+1(c) and 2(b) below: Kliner sources use neither, the lexer keeps
+rejecting `$`, the parser keeps rejecting interpolation. Revisit (1(b),
+2(a)) when Kliner compiles user programs, after self-hosting.
+
+Stage 3 parses Klin without these two features.
 Today a file with `$` outside a string or comment fails in the lexer
 with Klin's message (``unexpected character `$` ``) plus a note, and a
 string with an unescaped `$` fails in the parser (`string
@@ -724,3 +736,49 @@ literal `$` and works.
    - *(b) Not in the core:* Kliner sources use `out.lit` / `out.dec`;
      interpolation only for user programs, after self-hosting.
    - Suggestion: (b) now, (a) together with a `fmt` runtime.
+
+---
+
+## C11. Stage 3 review — DECIDED (2026-10-24)
+
+Marek accepted the five recommendations of the stage 3 report when
+merging #4 (`8812306`):
+
+1. **`$fn` and string interpolation** stay out of Kliner for now (C10).
+2. **AST model:** `Node` keeps the `tok` field (C2 AST).
+3. **`fn` without a body in `module sys`** (Kliner intrinsics,
+   `rt/linux_x86_64/sys.kl`) stays a documented difference from Klin
+   (tests/parse `div_sys`, tests/check `div_lib_sys`).
+4. **`let mut ok = 0` … `ok = f()!`** stays the pattern for an ignored
+   `!T` result while `f()!` is not a statement in Klin.
+5. **Roadmap numbering:** 2 lexer, 3 parser, 4 checker; the later
+   stages moved by two (IR 5, backend 6, fuller language 7,
+   self-hosting 8, targets 9, after self-hosting 10) —
+   [01-roadmap.md](01-roadmap.md).
+
+## C12. Stage 4 review — DECIDED (2026-10-24)
+
+Marek answered "yes" to the three points of the stage 4 report (PR #5):
+
+1. **Partial port of the "complete type" check** (C typedefs of struct
+   fields such as `[]*mut [2]Token`, an `fn` field returning an array of
+   structs; Klin `error_175`, `error_207`–`209`) is enough. Kliner's
+   backend emits no C typedefs; the difference stays documented
+   ([04-checker.md](04-checker.md), tests/check `div_typedef`).
+2. **Klin bugs K-B1 and K-B2** (04-checker.md) were reported to the Klin
+   bot on 2026-10-24; nothing is changed in the Klin repo from here.
+3. **`str` is in Kliner now** (D22, Klin main `a66ffbd`): string
+   literals `"…"` have type `str`; `s.len` is `strlen` as `i32`
+   (read-only); `s[i]` is `u8`, read-only (`cannot assign through a
+   string`); no subslice; `cstr_u8(s)` is a read-only `[]u8` (builtin);
+   `main(args: []str)`; `str` as a local, global, field, parameter or
+   slice element. Not: `const X: str`, `cast` from / to `str`,
+   arithmetic or `==` on `str`, `match` on `str` (same errors as Klin).
+   String interpolation stays a parser error (C10). Compiler code keeps
+   using `[]u8` / `b"…"` (C7.1).
+4. **Arguments (option, not a change):** with (3), `fn main(args: []str)`
+   plus `cstr_u8(args[i])` gives the argument bytes without
+   `/proc/self/cmdline` and without a shim function. v0 keeps
+   `/proc/self/cmdline` (C7.4); the switch happens together with
+   `_start` passing `argc` / `argv` (C6), and needs only `os.args` to
+   change.

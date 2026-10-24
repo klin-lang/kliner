@@ -1,0 +1,5 @@
+fn main() {
+  let buf: [3]i32 = [1, 2, 3]
+  let s = buf[:]
+  let [a, b, c] = s
+}

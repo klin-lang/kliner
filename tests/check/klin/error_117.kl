@@ -1,0 +1,2 @@
+const X: i8 = -129
+fn main() {}

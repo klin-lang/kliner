@@ -1,0 +1,4 @@
+const FLAG: bool = true
+fn main() {
+  let buf: [FLAG]u8
+}

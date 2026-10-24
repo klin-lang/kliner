@@ -340,7 +340,8 @@ void expr(Expr e) {
         line('or-block', x.fallback.pos, 'n=${x.fallback.stmts.length}');
         kids(() {
           x.fallback.stmts.forEach(stmt);
-          expr(x.fallback.value);
+          final v = x.fallback.value;
+          if (v != null) expr(v);
         });
       });
     case MatchExpr x:

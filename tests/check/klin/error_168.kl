@@ -1,0 +1,2 @@
+fn z(): [0]u8 { return [1] }
+fn main() {}

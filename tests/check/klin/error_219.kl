@@ -1,0 +1,7 @@
+module app
+import holder
+fn inc(x: i32): i32 { return x + 1 }
+fn main() {
+  let h = holder.Holder{ cb: inc }
+  h.cb(1)
+}

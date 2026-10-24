@@ -1,0 +1,3 @@
+@[isr, codename("TIM2_IRQHandler")]
+fn on_tim2() {}
+fn main() {}

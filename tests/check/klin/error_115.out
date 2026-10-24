@@ -1,0 +1,1 @@
+1:15: integer literal `0x12C` is out of range for `u8` (0..=255)

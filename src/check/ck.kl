@@ -1,0 +1,852 @@
+// module check — the checker (stage 4): name resolution, module imports
+// and types for the Kliner subset. A port of Klin's lib/checker.dart:
+// the same passes in the same order and the same first error (message
+// and position), so `kliner-check` and Klin agree on the same files.
+//
+// The state is one Ck reached through *mut Ck; there are no globals.
+// Klin stores facts on AST nodes (resolvedType, arrayByValue, …); here
+// they live in per-file side arrays load.File.rt (type id per node, -1
+// none) and load.File.fl (flags per node, F_*).
+//
+// An error is the code E_CHECK with the message in Ck.msg and the
+// position in (ef, etok). E_NOTCONST is Klin's _NotConstExpr: an
+// expression that is not an integer constant expression (no message).
+//
+// ck.kl: the state, errors and messages, constants (Big), the scope and
+// node helpers.
+module check
+import arena
+import ast
+import lex
+import load
+import tab
+import types
+
+pub const E_CHECK: i32 = 1003
+const E_NOTCONST: i32 = 1001
+const MSG: i32 = 1024
+
+const F_ENUMC: u8 = 1 // Get: an enum constant (Klin enumConstCName)
+const F_ABV: u8 = 2 // Name: an array variable bound by value
+const F_CSTR: u8 = 4 // Call: cstr_u8 (read-only bytes)
+const F_MODV: u8 = 8 // Get: a module constant, global or function
+const F_MODG: u8 = 16 // Get: a module global read through its qualifier
+
+// An integer constant: sign and a 128-bit magnitude (Klin uses BigInt;
+// every operand of a constant operation fits 64 bits, so 128 bits hold
+// every result). huge: a literal wider than 128 bits.
+struct Big {
+    neg: bool
+    hi: u64
+    lo: u64
+    huge: bool
+}
+
+struct Sym {
+    name: []u8
+    ty: i32
+    is_mut: bool
+    ptr_recv: bool
+    abv: bool // arrayByValue
+    rob: bool // readOnlyBytes
+    file: i32
+    tok: i32
+}
+
+pub struct Ck {
+    a: *mut arena.Arena
+    p: *mut load.Prog
+    t: types.Types
+    require_main: bool
+    structs: tab.Map // (name, module) -> struct index
+    enums: tab.Map
+    consts: tab.Map
+    globals: tab.Map
+    funcs: tab.Map // (name, module) -> function index (free functions)
+    methods: tab.Map // (name, receiver type) -> function index
+    assoc: tab.Map // (name, type) -> function index
+    cnames: tab.Map // codename -> 1
+    enum_base: []i32 // base primitive per enum
+    const_ty: []i32
+    const_st: []u8 // 0 unbound, 1 evaluating, 2 bound
+    const_v: []Big
+    glob_ty: []i32
+    glob_rob: []u8
+    fn_ret: []i32 // -1 until registered
+    fn_recv: []i32 // receiver type or -1
+    syms: []Sym
+    ns: i32
+    marks: []i32
+    nmk: i32
+    cf: i32 // current file
+    cm: i32 // current module
+    cfn: i32 // current function
+    ret: i32 // current return type
+    loops: i32
+    defers: i32
+    allow_match: bool
+    ef: i32
+    etok: i32
+    msg: [MSG]u8
+    mn: i32
+}
+
+// ---- errors ----
+
+fn madd(c: *mut Ck, s: []u8) {
+    for i in 0..<s.len {
+        if (*c).mn < MSG {
+            (*c).msg[(*c).mn] = s[i]
+            (*c).mn += 1
+        }
+    }
+}
+
+fn mdec(c: *mut Ck, v: i64) {
+    let mut buf: [24]u8
+    let mut n = 0
+    let mut x = v
+    if x < 0 {
+        madd(c, b"-")
+        if x == 0 - 9223372036854775807 - 1 {
+            madd(c, b"9223372036854775808")
+            return
+        }
+        x = 0 - x
+    }
+    if x == 0 {
+        madd(c, b"0")
+        return
+    }
+    while x > 0 {
+        buf[n] = cast(u8, x % 10) + 48
+        x = x / 10
+        n += 1
+    }
+    let mut out: [24]u8
+    for i in 0..<n {
+        out[i] = buf[n - 1 - i]
+    }
+    madd(c, out[:n])
+}
+
+// Start an error at tok of the current file.
+fn fail(c: *mut Ck, tok: i32, s: []u8): i32 {
+    (*c).ef = (*c).cf
+    (*c).etok = tok
+    (*c).mn = 0
+    madd(c, s)
+    return E_CHECK
+}
+
+// `s1` + name + `s2`, the common shape.
+fn fail3(c: *mut Ck, tok: i32, s1: []u8, x: []u8, s2: []u8): i32 {
+    let e = fail(c, tok, s1)
+    madd(c, x)
+    madd(c, s2)
+    return e
+}
+
+// Move the reported position (Klin's re-thrown CheckError(e.message, pos)).
+fn repos(c: *mut Ck, err: i32, tok: i32): i32 {
+    if err == E_CHECK {
+        (*c).ef = (*c).cf
+        (*c).etok = tok
+    }
+    return err
+}
+
+pub fn message(c: *mut Ck): []u8 {
+    return (*c).msg[:(*c).mn]
+}
+
+// ---- types: display ----
+
+fn decl_name(c: *mut Ck, r: load.Ref): []u8 {
+    let f = load.file((*c).p, r.file)
+    return load.text((*c).p, r.file, (*f).t.nodes[r.node].a)
+}
+
+fn decl_mod(c: *mut Ck, r: load.Ref): i32 {
+    let f = load.file((*c).p, r.file)
+    return (*f).mid
+}
+
+fn add_qual(c: *mut Ck, r: load.Ref) {
+    let m = (*(*c).p).mods[decl_mod(c, r)]
+    if m.len > 0 {
+        madd(c, m)
+        madd(c, b".")
+    }
+    madd(c, decl_name(c, r))
+}
+
+// Klin's displayName.
+fn addt(c: *mut Ck, id: i32) {
+    let y = types.ty(&(*c).t, id)
+    match y.kind {
+        types.Tk.Prim {
+            madd(c, types.prim_name(y.a))
+        }
+        types.Tk.Void {
+            madd(c, b"void")
+        }
+        types.Tk.Struct {
+            add_qual(c, (*(*c).p).structs.r[y.a])
+        }
+        types.Tk.Enum {
+            add_qual(c, (*(*c).p).enums.r[y.a])
+        }
+        types.Tk.Ptr {
+            madd(c, b"*")
+            if y.b == 1 {
+                madd(c, b"mut ")
+            }
+            addt(c, y.a)
+        }
+        types.Tk.Array {
+            madd(c, b"[")
+            mdec(c, y.n)
+            madd(c, b"]")
+            addt(c, y.a)
+        }
+        types.Tk.Slice {
+            madd(c, b"[]")
+            addt(c, y.a)
+        }
+        types.Tk.Fn {
+            madd(c, b"fn(")
+            let np = types.nparams(&(*c).t, id)
+            for j in 0..<np {
+                if j > 0 {
+                    madd(c, b", ")
+                }
+                addt(c, types.param(&(*c).t, id, j))
+            }
+            madd(c, b"): ")
+            addt(c, y.a)
+        }
+        types.Tk.Result {
+            madd(c, b"!")
+            addt(c, y.a)
+        }
+        types.Tk.UInt {
+            madd(c, b"untyped int")
+        }
+        types.Tk.UEmpty {
+            madd(c, b"[0]")
+        }
+        types.Tk.Str {
+            madd(c, b"str")
+        }
+        types.Tk.BareErr {
+            madd(c, b"error")
+        }
+    }
+}
+
+// Klin's _typeForMismatch.
+fn addm(c: *mut Ck, id: i32) {
+    let y = types.ty(&(*c).t, id)
+    if y.kind == types.Tk.UInt {
+        madd(c, b"i32")
+        return
+    }
+    if y.kind == types.Tk.Array {
+        madd(c, b"[")
+        mdec(c, y.n)
+        madd(c, b"]")
+        addm(c, y.a)
+        return
+    }
+    addt(c, id)
+}
+
+// `s1` + type + `s2`.
+fn failt(c: *mut Ck, tok: i32, s1: []u8, ty: i32, s2: []u8): i32 {
+    let e = fail(c, tok, s1)
+    addt(c, ty)
+    madd(c, s2)
+    return e
+}
+
+// ---- types: shortcuts ----
+
+fn kind(c: *mut Ck, id: i32): types.Tk {
+    return types.kind(&(*c).t, id)
+}
+
+fn tyof(c: *mut Ck, id: i32): types.Ty {
+    return types.ty(&(*c).t, id)
+}
+
+fn is_int(c: *mut Ck, id: i32): bool {
+    return types.is_int(&(*c).t, id)
+}
+
+fn is_num(c: *mut Ck, id: i32): bool {
+    return types.is_int(&(*c).t, id) || types.is_float(&(*c).t, id)
+}
+
+fn is_uns(c: *mut Ck, id: i32): bool {
+    return types.is_unsigned(&(*c).t, id)
+}
+
+fn elem(c: *mut Ck, id: i32): i32 {
+    return types.ty(&(*c).t, id).a
+}
+
+fn mk_array(c: *mut Ck, e: i32, n: i64): !i32 {
+    return types.array(&(*c).t, (*c).a, e, n)
+}
+
+fn mk_slice(c: *mut Ck, e: i32): !i32 {
+    return types.slice(&(*c).t, (*c).a, e)
+}
+
+fn mk_result(c: *mut Ck, ok: i32): !i32 {
+    return types.result(&(*c).t, (*c).a, ok)
+}
+
+fn mk_ptr(c: *mut Ck, to: i32, is_mut: bool): !i32 {
+    return types.ptr(&(*c).t, (*c).a, to, is_mut)
+}
+
+fn is_u8_slice(c: *mut Ck, id: i32): bool {
+    if id < 0 {
+        return false
+    }
+    return kind(c, id) == types.Tk.Slice && elem(c, id) == types.U8
+}
+
+// ---- nodes ----
+
+fn fl(c: *mut Ck): *mut load.File {
+    return load.file((*c).p, (*c).cf)
+}
+
+fn nd(c: *mut Ck, n: i32): ast.Node {
+    let f = load.file((*c).p, (*c).cf)
+    return (*f).t.nodes[n]
+}
+
+fn nk(c: *mut Ck, n: i32): ast.Nk {
+    let f = load.file((*c).p, (*c).cf)
+    return (*f).t.nodes[n].kind
+}
+
+fn txt(c: *mut Ck, tok: i32): []u8 {
+    return load.text((*c).p, (*c).cf, tok)
+}
+
+fn cnt(c: *mut Ck, l: i32): i32 {
+    if l < 0 {
+        return 0
+    }
+    let f = load.file((*c).p, (*c).cf)
+    return ast.count(&(*f).t, l)
+}
+
+fn kid(c: *mut Ck, l: i32, i: i32): i32 {
+    let f = load.file((*c).p, (*c).cf)
+    return ast.item(&(*f).t, l, i)
+}
+
+fn get_rt(c: *mut Ck, n: i32): i32 {
+    let f = load.file((*c).p, (*c).cf)
+    return (*f).rt[n]
+}
+
+fn set_rt(c: *mut Ck, n: i32, ty: i32) {
+    let f = load.file((*c).p, (*c).cf)
+    (*f).rt[n] = ty
+}
+
+fn has_fl(c: *mut Ck, n: i32, bit: u8): bool {
+    let f = load.file((*c).p, (*c).cf)
+    return ((*f).fl[n] & bit) != 0
+}
+
+fn set_fl(c: *mut Ck, n: i32, bit: u8) {
+    let f = load.file((*c).p, (*c).cf)
+    (*f).fl[n] = (*f).fl[n] | bit
+}
+
+fn is_text(c: *mut Ck, tok: i32, s: []u8): bool {
+    return tab.eq(txt(c, tok), s)
+}
+
+// Klin's _peelGroups / _unwrapGroups.
+fn peel(c: *mut Ck, n: i32): i32 {
+    let mut x = n
+    while nk(c, x) == ast.Nk.Group {
+        x = nd(c, x).a
+    }
+    return x
+}
+
+// The operator text of a Unary / Binary node.
+fn op(c: *mut Ck, n: i32): []u8 {
+    return txt(c, nd(c, n).tok)
+}
+
+// ---- the scope ----
+
+fn push_scope(c: *mut Ck): !i32 {
+    if (*c).nmk == (*c).marks.len {
+        let mut m = arena.alloc_i32((*c).a, (*c).nmk * 2)!
+        for i in 0..<(*c).nmk {
+            m[i] = (*c).marks[i]
+        }
+        (*c).marks = m
+    }
+    (*c).marks[(*c).nmk] = (*c).ns
+    (*c).nmk += 1
+    return 0
+}
+
+fn pop_scope(c: *mut Ck) {
+    (*c).nmk -= 1
+    (*c).ns = (*c).marks[(*c).nmk]
+}
+
+fn reset_scope(c: *mut Ck) {
+    (*c).ns = 0
+    (*c).nmk = 0
+}
+
+fn alloc_syms(a: *mut arena.Arena, n: i32): ![]Sym {
+    let two: [2]Sym
+    let size = cast(i64, &two[1]) - cast(i64, &two[0])
+    let p = cast(*mut [arena.MAX_LEN]Sym, arena.alloc_addr(a, size * cast(i64, n))!)
+    return (*p)[:n]
+}
+
+// The innermost symbol named `name`, or -1.
+fn lookup(c: *mut Ck, name: []u8): i32 {
+    let mut i = (*c).ns - 1
+    while i >= 0 {
+        if tab.eq((*c).syms[i].name, name) {
+            return i
+        }
+        i -= 1
+    }
+    return -1
+}
+
+fn define(c: *mut Ck, s: Sym): !i32 {
+    let mut base = 0
+    if (*c).nmk > 0 {
+        base = (*c).marks[(*c).nmk - 1]
+    }
+    for i in base..<(*c).ns {
+        if tab.eq((*c).syms[i].name, s.name) {
+            let saved = (*c).cf
+            (*c).cf = s.file
+            let e = fail3(c, s.tok, b"redeclaration of `", s.name, b"` in the same scope")
+            (*c).cf = saved
+            return error(e)
+        }
+    }
+    if (*c).ns == (*c).syms.len {
+        let mut m = alloc_syms((*c).a, (*c).ns * 2)!
+        for i in 0..<(*c).ns {
+            m[i] = (*c).syms[i]
+        }
+        (*c).syms = m
+    }
+    (*c).syms[(*c).ns] = s
+    (*c).ns += 1
+    return 0
+}
+
+fn sym(c: *mut Ck, name: []u8, ty: i32, is_mut: bool, tok: i32): Sym {
+    return Sym{name: name, ty: ty, is_mut: is_mut, ptr_recv: false, abv: false, rob: false, file: (*c).cf, tok: tok}
+}
+
+// ---- big integers ----
+
+fn big_u(v: u64): Big {
+    return Big{neg: false, hi: 0, lo: v, huge: false}
+}
+
+fn big_i(v: i64): Big {
+    if v < 0 {
+        return Big{neg: true, hi: 0, lo: cast(u64, 0) - cast(u64, v), huge: false}
+    }
+    return big_u(cast(u64, v))
+}
+
+fn big_zero(x: Big): bool {
+    return !x.huge && x.hi == 0 && x.lo == 0
+}
+
+fn big_neg(x: Big): Big {
+    if big_zero(x) {
+        return x
+    }
+    return Big{neg: !x.neg, hi: x.hi, lo: x.lo, huge: x.huge}
+}
+
+// |x| <=> |y|
+fn mag_cmp(x: Big, y: Big): i32 {
+    if x.hi != y.hi {
+        if x.hi < y.hi {
+            return cast(i32, -1)
+        }
+        return 1
+    }
+    if x.lo != y.lo {
+        if x.lo < y.lo {
+            return cast(i32, -1)
+        }
+        return 1
+    }
+    return 0
+}
+
+fn mag_add(x: Big, y: Big, neg: bool): Big {
+    let lo = x.lo + y.lo
+    let mut carry: u64 = 0
+    if lo < x.lo {
+        carry = 1
+    }
+    return Big{neg: neg, hi: x.hi + y.hi + carry, lo: lo, huge: false}
+}
+
+// |x| - |y|, |x| >= |y|
+fn mag_sub(x: Big, y: Big, neg: bool): Big {
+    let lo = x.lo - y.lo
+    let mut borrow: u64 = 0
+    if x.lo < y.lo {
+        borrow = 1
+    }
+    let r = Big{neg: neg, hi: x.hi - y.hi - borrow, lo: lo, huge: false}
+    if big_zero(r) {
+        return big_u(0)
+    }
+    return r
+}
+
+fn big_add(x: Big, y: Big): Big {
+    if x.neg == y.neg {
+        return mag_add(x, y, x.neg)
+    }
+    if mag_cmp(x, y) >= 0 {
+        return mag_sub(x, y, x.neg)
+    }
+    return mag_sub(y, x, y.neg)
+}
+
+fn big_sub(x: Big, y: Big): Big {
+    return big_add(x, big_neg(y))
+}
+
+// Operands fit 64 bits of magnitude.
+fn big_mul(x: Big, y: Big): Big {
+    let m: u64 = 0xFFFFFFFF
+    let a0 = x.lo & m
+    let a1 = x.lo >> 32
+    let b0 = y.lo & m
+    let b1 = y.lo >> 32
+    let p00 = a0 * b0
+    let p01 = a0 * b1
+    let p10 = a1 * b0
+    let p11 = a1 * b1
+    let mid = (p00 >> 32) + (p01 & m) + (p10 & m)
+    let lo = (p00 & m) | (mid << 32)
+    let hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32)
+    let r = Big{neg: x.neg != y.neg, hi: hi, lo: lo, huge: false}
+    if big_zero(r) {
+        return big_u(0)
+    }
+    return r
+}
+
+// Truncating division (Dart ~/); operands fit 64 bits.
+fn big_div(x: Big, y: Big): Big {
+    let q = x.lo / y.lo
+    let r = Big{neg: x.neg != y.neg, hi: 0, lo: q, huge: false}
+    if q == 0 {
+        return big_u(0)
+    }
+    return r
+}
+
+// x - (x ~/ y) * y: the sign of x.
+fn big_rem(x: Big, y: Big): Big {
+    let q = x.lo % y.lo
+    if q == 0 {
+        return big_u(0)
+    }
+    return Big{neg: x.neg, hi: 0, lo: q, huge: false}
+}
+
+// Two's complement view of a value in -2^64..2^64: (sign word, low word).
+fn tc_lo(x: Big): u64 {
+    if x.neg {
+        return cast(u64, 0) - x.lo
+    }
+    return x.lo
+}
+
+fn from_tc(sign: bool, lo: u64): Big {
+    if !sign {
+        return big_u(lo)
+    }
+    if lo == 0 {
+        return Big{neg: true, hi: 1, lo: 0, huge: false}
+    }
+    return Big{neg: true, hi: 0, lo: cast(u64, 0) - lo, huge: false}
+}
+
+// op: 0 &, 1 |, 2 ^
+fn big_bits(x: Big, y: Big, o: i32): Big {
+    let a = tc_lo(x)
+    let b = tc_lo(y)
+    if o == 0 {
+        return from_tc(x.neg && y.neg, a & b)
+    }
+    if o == 1 {
+        return from_tc(x.neg || y.neg, a | b)
+    }
+    return from_tc(x.neg != y.neg, a ^ b)
+}
+
+fn big_shl(x: Big, n: i32): Big {
+    if n == 0 {
+        return x
+    }
+    let hi = (x.hi << cast(u64, n)) | (x.lo >> cast(u64, 64 - n))
+    return Big{neg: x.neg, hi: hi, lo: x.lo << cast(u64, n), huge: false}
+}
+
+// Floor shift (BigInt >>); x fits 64 bits of magnitude.
+fn big_shr(x: Big, n: i32): Big {
+    if !x.neg {
+        return big_u(x.lo >> cast(u64, n))
+    }
+    // floor(-m / 2^n) = -ceil(m / 2^n)
+    let q = x.lo >> cast(u64, n)
+    let rest = x.lo - (q << cast(u64, n))
+    let mut r = q
+    if rest != 0 {
+        r += 1
+    }
+    if r == 0 {
+        return big_u(0)
+    }
+    return Big{neg: true, hi: 0, lo: r, huge: false}
+}
+
+fn bits_of(p: i32): i32 {
+    return types.width(p)
+}
+
+fn prim_uns(p: i32): bool {
+    return p == 4 || p == 5 || p == 6 || p == 7 || p == 11
+}
+
+// Klin's _bigIntFits for an integer primitive.
+fn big_fits(x: Big, p: i32): bool {
+    if x.huge || x.hi != 0 {
+        return false
+    }
+    let bits = bits_of(p)
+    if prim_uns(p) {
+        if x.neg {
+            return false
+        }
+        if bits == 64 {
+            return true
+        }
+        return x.lo <= (cast(u64, 1) << cast(u64, bits)) - 1
+    }
+    let lim = cast(u64, 1) << cast(u64, bits - 1)
+    if x.neg {
+        return x.lo <= lim
+    }
+    return x.lo < lim
+}
+
+// Klin's _bigBitwiseNot: x fits the kind.
+fn big_not(x: Big, p: i32): Big {
+    let bits = bits_of(p)
+    let mut mask: u64 = 0xFFFFFFFFFFFFFFFF
+    if bits < 64 {
+        mask = (cast(u64, 1) << cast(u64, bits)) - 1
+    }
+    let flipped = (~tc_lo(x)) & mask
+    if prim_uns(p) {
+        return big_u(flipped)
+    }
+    let sign = cast(u64, 1) << cast(u64, bits - 1)
+    if (flipped & sign) != 0 {
+        // flipped - 2^bits
+        let m = (~flipped & mask) + 1
+        return Big{neg: true, hi: 0, lo: m, huge: false}
+    }
+    return big_u(flipped)
+}
+
+fn big_bitlen_gt63(x: Big): bool {
+    return x.huge || x.hi != 0 || x.lo >= (cast(u64, 1) << 63)
+}
+
+// Decimal text of x into the message.
+fn mbig(c: *mut Ck, x: Big) {
+    if x.neg {
+        madd(c, b"-")
+    }
+    let mut hi = x.hi
+    let mut lo = x.lo
+    let mut buf: [48]u8
+    let mut n = 0
+    if hi == 0 && lo == 0 {
+        madd(c, b"0")
+        return
+    }
+    while hi != 0 || lo != 0 {
+        // divide (hi, lo) by 10
+        let qh = hi / 10
+        let rh = hi % 10
+        // (rh * 2^64 + lo) / 10 in 32-bit steps
+        let l1 = (rh << 32) | (lo >> 32)
+        let q1 = l1 / 10
+        let r1 = l1 % 10
+        let l0 = (r1 << 32) | (lo & 0xFFFFFFFF)
+        let q0 = l0 / 10
+        let r0 = l0 % 10
+        hi = qh
+        lo = (q1 << 32) | q0
+        buf[n] = cast(u8, r0) + 48
+        n += 1
+    }
+    let mut out: [48]u8
+    for i in 0..<n {
+        out[i] = buf[n - 1 - i]
+    }
+    madd(c, out[:n])
+}
+
+// Klin's _intRangeText.
+fn mrange(c: *mut Ck, p: i32) {
+    let bits = bits_of(p)
+    if prim_uns(p) {
+        madd(c, b"0..=")
+        if bits == 64 {
+            madd(c, b"18446744073709551615")
+        } else {
+            mdec(c, (cast(i64, 1) << cast(i64, bits)) - 1)
+        }
+        return
+    }
+    if bits == 64 {
+        madd(c, b"-9223372036854775808..=9223372036854775807")
+        return
+    }
+    let lim = cast(i64, 1) << cast(i64, bits - 1)
+    mdec(c, 0 - lim)
+    madd(c, b"..=")
+    mdec(c, lim - 1)
+}
+
+fn digit(ch: u8, radix: u64): i32 {
+    let mut d: i32 = 99
+    if ch >= 48 && ch <= 57 {
+        d = cast(i32, ch) - 48
+    } else if ch >= 97 && ch <= 122 {
+        d = cast(i32, ch) - 87
+    } else if ch >= 65 && ch <= 90 {
+        d = cast(i32, ch) - 55
+    }
+    if cast(u64, d) >= radix {
+        return -1
+    }
+    return d
+}
+
+// Klin's _bigLitValue: the value of an integer literal token, or -1 in
+// ok (not a literal value: Klin's null).
+struct LitV {
+    ok: bool
+    v: Big
+}
+
+fn lit_value(c: *mut Ck, tok: i32): LitV {
+    let s = txt(c, tok)
+    let none = LitV{ok: false, v: big_u(0)}
+    if s.len > 0 && s[0] == 39 {
+        // 'x' or '\n'
+        if s.len < 3 || s[s.len - 1] != 39 {
+            return none
+        }
+        let inner = s[1:s.len - 1]
+        if inner.len == 2 && inner[0] == 92 {
+            let e = inner[1]
+            if e == 110 {
+                return LitV{ok: true, v: big_u(10)}
+            }
+            if e == 116 {
+                return LitV{ok: true, v: big_u(9)}
+            }
+            if e == 48 {
+                return LitV{ok: true, v: big_u(0)}
+            }
+            if e == 92 || e == 39 {
+                return LitV{ok: true, v: big_u(cast(u64, e))}
+            }
+            return none
+        }
+        if inner.len == 1 {
+            return LitV{ok: true, v: big_u(cast(u64, inner[0]))}
+        }
+        return none
+    }
+    let mut radix: u64 = 10
+    let mut i = 0
+    if s.len >= 2 && s[0] == 48 {
+        let x = s[1]
+        if x == 120 || x == 88 {
+            radix = 16
+        } else if x == 98 || x == 66 {
+            radix = 2
+        } else if x == 111 || x == 79 {
+            radix = 8
+        }
+        if radix != 10 {
+            i = 2
+        }
+    }
+    let mut v = big_u(0)
+    let mut any = false
+    let r = big_u(radix)
+    while i < s.len {
+        if s[i] == 95 {
+            i += 1
+            continue
+        }
+        let d = digit(s[i], radix)
+        if d < 0 {
+            return none
+        }
+        any = true
+        if !v.huge {
+            // v = v * radix + d, 128 bits
+            if v.hi >= (cast(u64, 1) << 59) {
+                v.huge = true
+            } else {
+                let lo = big_mul(big_u(v.lo), r)
+                let hi = big_mul(big_u(v.hi), r)
+                let mut nv = Big{neg: false, hi: lo.hi + hi.lo, lo: lo.lo, huge: false}
+                nv = mag_add(nv, big_u(cast(u64, d)), false)
+                v = nv
+            }
+        }
+        i += 1
+    }
+    if !any {
+        return none
+    }
+    return LitV{ok: true, v: v}
+}

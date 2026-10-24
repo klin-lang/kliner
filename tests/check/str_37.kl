@@ -1,0 +1,7 @@
+struct T {
+    name: str
+}
+fn main(): i32 {
+    let t: T
+    return t.name.len
+}

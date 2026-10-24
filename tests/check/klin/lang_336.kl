@@ -1,0 +1,3 @@
+@[cexport, cimport, codename("x")]
+fn x()
+fn main() {}

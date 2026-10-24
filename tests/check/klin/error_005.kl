@@ -1,0 +1,2 @@
+fn add(a, b): i32 { return a }
+fn main() {}

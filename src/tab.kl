@@ -1,0 +1,102 @@
+// module tab — hash table from (name, number) to i32 (stage 4). The
+// checker's symbol tables: `mod.name` is (name, module id), a method is
+// (name, type id), an import alias is (alias, module id). Open
+// addressing, linear probing, the table doubles at 1/2 load. Keys are
+// slices into source text or the arena; nothing is copied.
+module tab
+import arena
+
+pub struct Map {
+    keys: [][]u8
+    nums: []i32
+    vals: []i32 // -1 = empty slot
+    n: i32
+}
+
+fn new_slots(m: *mut Map, a: *mut arena.Arena, cap: i32): !i32 {
+    (*m).keys = arena.alloc_slices_u8(a, cap)!
+    (*m).nums = arena.alloc_i32(a, cap)!
+    (*m).vals = arena.alloc_i32(a, cap)!
+    for i in 0..<cap {
+        (*m).vals[i] = -1
+    }
+    return 0
+}
+
+pub fn Map.new(a: *mut arena.Arena): !Map {
+    let mut m: Map
+    let ok = new_slots(&m, a, 64)!
+    return m
+}
+
+pub fn eq(x: []u8, y: []u8): bool {
+    if x.len != y.len {
+        return false
+    }
+    for i in 0..<x.len {
+        if x[i] != y[i] {
+            return false
+        }
+    }
+    return true
+}
+
+// FNV-1a over the bytes and the four bytes of n.
+fn hash(k: []u8, n: i32): u64 {
+    let mut h: u64 = 14695981039346656037
+    for i in 0..<k.len {
+        h = (h ^ cast(u64, k[i])) * 1099511628211
+    }
+    let u = cast(u64, cast(u32, n))
+    for s in 0..<4 {
+        h = (h ^ ((u >> cast(u64, s * 8)) & 255)) * 1099511628211
+    }
+    return h
+}
+
+fn slot(m: *mut Map, k: []u8, n: i32): i32 {
+    let mask = (*m).vals.len - 1
+    let mut i = cast(i32, hash(k, n) & cast(u64, mask))
+    while (*m).vals[i] >= 0 {
+        if (*m).nums[i] == n && eq((*m).keys[i], k) {
+            return i
+        }
+        i = (i + 1) & mask
+    }
+    return i
+}
+
+// Value of (k, n), -1 when absent.
+pub fn get(m: *mut Map, k: []u8, n: i32): i32 {
+    return (*m).vals[slot(m, k, n)]
+}
+
+pub fn has(m: *mut Map, k: []u8, n: i32): bool {
+    return get(m, k, n) >= 0
+}
+
+// Sets (k, n) to v (v >= 0).
+pub fn put(m: *mut Map, a: *mut arena.Arena, k: []u8, n: i32, v: i32): !i32 {
+    if ((*m).n + 1) * 2 > (*m).vals.len {
+        let keys = (*m).keys
+        let nums = (*m).nums
+        let vals = (*m).vals
+        let ok = new_slots(m, a, vals.len * 2)!
+        for j in 0..<vals.len {
+            if vals[j] >= 0 {
+                let i = slot(m, keys[j], nums[j])
+                (*m).keys[i] = keys[j]
+                (*m).nums[i] = nums[j]
+                (*m).vals[i] = vals[j]
+            }
+        }
+    }
+    let i = slot(m, k, n)
+    if (*m).vals[i] < 0 {
+        (*m).n += 1
+    }
+    (*m).keys[i] = k
+    (*m).nums[i] = n
+    (*m).vals[i] = v
+    return v
+}

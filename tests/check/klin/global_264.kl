@@ -1,0 +1,3 @@
+fn next(): i32 { return 1 }
+let mut n: i32 = next()
+fn main() {}

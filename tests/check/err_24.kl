@@ -1,0 +1,4 @@
+const N: i32 = 3
+fn main() {
+    N = 4
+}

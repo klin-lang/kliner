@@ -1,0 +1,5 @@
+module util
+pub fn f(): i32 {
+    let b: bool = 3
+    return 2
+}

@@ -1,0 +1,1 @@
+2:13: `error(...)` in `match` needs at least one success arm to infer `!T`

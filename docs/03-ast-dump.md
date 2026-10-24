@@ -57,4 +57,5 @@ Expressions: `int v=`, `float v=`, `bool v=`, `str v=` (decoded; `\$` is
 `call mod= name=` (args), `unary op=`, `binary op=`, `index`,
 `slice start= end=`, `array`, `cast type=`, `group`, `error`,
 `propagate` (`!`), `await`, `or` (value, `or-block n=`: statements then
-the final value), `pick` (cond, then, else).
+the final value, none when the block diverges — D21), `pick` (cond,
+then, else).

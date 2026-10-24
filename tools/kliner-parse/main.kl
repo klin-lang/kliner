@@ -705,7 +705,9 @@ fn expr(c: *mut Ctx, x: ast.Node, depth: i32): !i32 {
             (*o).dec(cast(i64, count(c, fb.extra)))
             (*o).nl()
             ok = each(c, fb.extra, 0, d1 + 1)!
-            ok = dump(c, fb.a, d1 + 1)!
+            if fb.a >= 0 {
+                ok = dump(c, fb.a, d1 + 1)!
+            }
         }
         ast.Nk.Pick {
             head(c, depth, b"pick", x.tok)

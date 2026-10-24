@@ -1,0 +1,5 @@
+import util
+fn main() {
+    let p = util.P{a: 1}
+    let v = p.b
+}

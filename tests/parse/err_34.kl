@@ -1,0 +1,6 @@
+fn f(k: i32) {
+    w := g() or {
+        match k { 1 { 0 } else { 1 } }
+        break
+    }
+}

@@ -1,0 +1,4 @@
+let g: str = "hi"
+fn main(): i32 {
+    return g.len
+}

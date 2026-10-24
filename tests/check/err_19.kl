@@ -1,0 +1,5 @@
+fn g(): i32 {
+    return
+}
+fn main() {
+}

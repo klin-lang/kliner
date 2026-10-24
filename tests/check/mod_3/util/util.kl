@@ -1,0 +1,9 @@
+module util
+pub const K: i32 = 2
+pub let G: i32 = 1
+pub struct P {
+    a: i32
+}
+pub fn shown(): i32 {
+    return 2
+}
