@@ -37,12 +37,13 @@ KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
 - `tools/kliner-ir/` — `kliner-ir [-I DIR]... FILE` IR dump; `tools/kliner-run/` — `kliner-run [-I DIR]... FILE.kl [ARG]...` (interprets, e.g. `-I rt/linux_x86_64 -I rt -I src`)
 - `tests/ir/` — program goldens (stdout + exit code), compared with the Klin-built binaries
 - `src/x64/` — x86-64 encoder, code generator, ELF64 writer ([docs](docs/06-x86-64.md)); `tools/kliner-build/` — `kliner-build [-I DIR]... FILE.kl -o OUT` (e.g. `-I rt/linux_x86_64 -I rt -I src`)
-- `tests/x64/` — backend goldens (= `kliner-run`; Klin's C differs on shifts, K-B6)
+- `tests/x64/` — backend goldens where Klin's C differs (reference `kliner-run`; empty since Klin `e6058dc`)
 
 ```sh
 tools/kliner-build/out/main -I rt/linux_x86_64 -I rt tests/rt/hello/main.kl -o hello && ./hello
 ```
 
+- [All decisions (register, English)](docs/decisions.md)
 - [Design decisions](docs/00-decisions.md)
 - [Roadmap](docs/01-roadmap.md)
 - [Core subset and runtime](docs/02-core-subset.md) (stage 1, proposal)

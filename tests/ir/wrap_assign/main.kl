@@ -1,0 +1,29 @@
+module main
+import os
+import out
+fn main() {
+    let mut o = out.Out.stdout()
+    let mut a: i32 = 1
+    let n: i32 = 33
+    a <<= n
+    o.dec(cast(i64, a))
+    o.nl()
+    let mut b: u64 = 12345
+    let m: u64 = 64
+    b >>= m
+    o.dec(cast(i64, b))
+    o.nl()
+    let p: u16 = 65535
+    let q: u16 = 2
+    if p + q > 65535 {
+        o.lit(b"bad")
+        o.nl()
+    }
+    o.dec(cast(i64, p + q))
+    o.nl()
+    let h: i16 = 32767
+    o.dec(cast(i64, h + h))
+    o.nl()
+    o.flush_quiet()
+    os.exit(0)
+}

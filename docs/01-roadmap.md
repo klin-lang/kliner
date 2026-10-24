@@ -69,7 +69,7 @@ Proposal: [02-core-subset.md](02-core-subset.md).
 - [x] **Milestone: hello world without libc** (`tests/rt/hello`: 18 KB static ELF64, no `PT_INTERP`, no dynamic section)
 - [x] Backend goldens: `tests/ir` (= Klin = kliner-run), `tests/x64` (C13 edges), `tests/rt` hello / alloc / args / cat, traps
 - [x] Kliner's lexer, parser, checker, IR dump, interpreter and `kliner-build` compiled by `kliner-build`: output identical to the Klin-built tools; `kliner-build` rebuilds itself byte for byte
-- [ ] Decisions C14 (backend): PROPOSED
+- [x] Decisions C14 (backend): DECIDED 2026-10-24
 
 ## 7. Fuller language
 
@@ -89,11 +89,13 @@ Klin — floats, `$fn`, interpolation, `pick`, `async`.)
 - [ ] stage1: Kliner built by current Klin
 - [ ] stage2: built by stage1
 - [ ] stage3: built by stage2
-- [ ] **stage2 == stage3, byte for byte**
+- [x] **stage2 == stage3, byte for byte**
 
-(Stage 6 already has this for `kliner-build`: Klin-built → native
-stage 2 → stage 3, stage 2 == stage 3 byte for byte. PROPOSED: tick
-the boxes once Marek accepts `kliner-build` as "Kliner".)
+(Reached in stage 6, PR #7, for `kliner-build`: Klin-built stage 1 →
+native stage 2 → stage 3, stage 2 == stage 3 byte for byte, checked by
+`scripts/test.sh`. Ticked 2026-10-24 on Marek's approval. The
+stage1–stage3 builds above exist for `kliner-build` as well; those
+boxes are left for Marek, since K5 names the compiler `kliner`.)
 
 ## 9. More targets
 
