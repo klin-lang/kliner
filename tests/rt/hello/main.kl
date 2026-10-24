@@ -1,0 +1,33 @@
+// hello through out: literals, dec (incl. i64 min), hex, stderr, exit code.
+module main
+import os
+import out
+
+fn main() {
+    let mut o = out.Out.stdout()
+    let mut e = out.Out.stderr()
+    o.lit(b"hello, kliner")
+    o.nl()
+    o.dec(0)
+    o.lit(b" ")
+    o.dec(42)
+    o.lit(b" ")
+    o.dec(-7)
+    o.lit(b" ")
+    o.dec(-9223372036854775807 - 1)
+    o.nl()
+    o.hex(0)
+    o.lit(b" ")
+    o.hex(255)
+    o.lit(b" ")
+    o.hex(0xffffffffffffffff)
+    o.nl()
+    e.lit(b"to stderr ")
+    e.errno_name(2)
+    e.lit(b" ")
+    e.errno_name(999)
+    e.nl()
+    o.flush_quiet()
+    e.flush_quiet()
+    os.exit(3)
+}

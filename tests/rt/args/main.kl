@@ -1,0 +1,37 @@
+// argv via os.args (/proc/self/cmdline, C7.4): count, then one argument per line.
+module main
+import arena
+import os
+import out
+
+fn run(o: *mut out.Out): !i32 {
+    let mut a = arena.Arena.new(1 << 20)!
+    defer arena.free_all(&a)
+    let args = os.args(&a)!
+    (*o).lit(b"argc ")
+    (*o).dec(cast(i64, args.list.len))
+    (*o).nl()
+    for i in 1..<args.list.len {
+        (*o).dec(cast(i64, i))
+        (*o).lit(b" [")
+        (*o).lit(args.list[i])
+        (*o).lit(b"] z")
+        (*o).dec(cast(i64, args.arg_z(i).len))
+        (*o).nl()
+    }
+    return 0
+}
+
+fn main() {
+    let mut o = out.Out.stdout()
+    let mut e = out.Out.stderr()
+    let code = run(&o) or {
+        e.lit(b"error: ")
+        e.errno_name(err)
+        e.nl()
+        1
+    }
+    o.flush_quiet()
+    e.flush_quiet()
+    os.exit(code)
+}

@@ -1,0 +1,44 @@
+// cat via os: `cat IN` prints IN to stdout, `cat IN OUT` writes it to OUT
+// (open_write, mode 0o755). Size goes to stderr. Errors: "error: ENOENT", exit 1.
+module main
+import arena
+import os
+import out
+
+fn run(o: *mut out.Out, e: *mut out.Out): !i32 {
+    let mut a = arena.Arena.new(1 << 30)!
+    defer arena.free_all(&a)
+    let args = os.args(&a)!
+    if args.list.len < 2 {
+        (*e).lit(b"usage: cat IN [OUT]")
+        (*e).nl()
+        return 2
+    }
+    let data = os.read_file(&a, args.arg_z(1))!
+    (*e).lit(b"read ")
+    (*e).dec(cast(i64, data.len))
+    (*e).nl()
+    if args.list.len < 3 {
+        (*o).lit(data)
+        return 0
+    }
+    let fd = os.open_write(args.arg_z(2))!
+    defer os.close_quiet(fd)
+    let w = os.write_all(fd, data)!
+    let c = os.close(fd)!
+    return 0
+}
+
+fn main() {
+    let mut o = out.Out.stdout()
+    let mut e = out.Out.stderr()
+    let code = run(&o, &e) or {
+        e.lit(b"error: ")
+        e.errno_name(err)
+        e.nl()
+        1
+    }
+    o.flush_quiet()
+    e.flush_quiet()
+    os.exit(code)
+}

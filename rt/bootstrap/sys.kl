@@ -1,0 +1,27 @@
+// module sys — bootstrap (stage1, built by Klin, linked with libc).
+// Same API as rt/linux_x86_64/sys.kl. Kliner never compiles this file:
+// it uses @[cimport] / @[link] (C4), allowed only here.
+module sys
+
+// Raw syscall. Returns the kernel value: >= 0 ok, -4095..-1 = -errno.
+@[link("shim.c")]
+@[cimport]
+@[codename("klrt_syscall6")]
+pub fn call6(nr: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64): i64
+
+// Slice -> address, for syscall arguments (C8.4). Plain Klin (D17):
+// &b[0] is b.ptr, no bounds check, so an empty slice gives its pointer.
+pub fn addr_u8(b: []u8): i64 {
+    return cast(i64, &b[0])
+}
+
+// Syscall numbers, x86-64 (C6). Bootstrap runs on the build host.
+pub const NR_READ: i64 = 0
+pub const NR_WRITE: i64 = 1
+pub const NR_CLOSE: i64 = 3
+pub const NR_FSTAT: i64 = 5
+pub const NR_LSEEK: i64 = 8
+pub const NR_MMAP: i64 = 9
+pub const NR_MUNMAP: i64 = 11
+pub const NR_EXIT_GROUP: i64 = 231
+pub const NR_OPENAT: i64 = 257

@@ -1,0 +1,97 @@
+// module arena — bump allocator over one mmap (docs/02-core-subset.md C6).
+// No free of single blocks: a phase drops the whole arena (reset / free_all).
+module arena
+import sys
+import os
+
+pub struct Arena {
+    base: i64 // address of the mmap range
+    used: i64
+    cap: i64
+}
+
+// One mmap(PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS, fd = -1).
+// Reserve generously (e.g. 1 GiB): the kernel commits pages lazily.
+pub fn Arena.new(cap: i64): !Arena {
+    let r = sys.call6(sys.NR_MMAP, 0, cap, os.PROT_READ | os.PROT_WRITE, os.MAP_PRIVATE | os.MAP_ANONYMOUS, -1, 0)
+    let base = os.check(r)!
+    let mut a: Arena
+    a.base = base
+    a.cap = cap
+    return a
+}
+
+// Raw block of `size` bytes: address, 8-byte aligned, zeroed (fresh mmap
+// pages are zero; reset clears reused memory). ENOMEM when full.
+// Building block for typed allocators, e.g. a per-table alloc_tok:
+//   cast(*mut [arena.MAX_LEN]Token, arena.alloc_addr(a, n * 12)!) then (*p)[:n]
+pub fn alloc_addr(a: *mut Arena, size: i64): !i64 {
+    if size < 0 {
+        return error(os.EINVAL)
+    }
+    let s = (size + 7) & ~7
+    if (*a).used + s > (*a).cap {
+        return error(os.ENOMEM)
+    }
+    let addr = (*a).base + (*a).used
+    (*a).used = (*a).used + s
+    return addr
+}
+
+// Largest slice length (.len is i32). Only the bound of the array type
+// used for the cast below; no memory of that size exists.
+pub const MAX_LEN: i32 = 0x7fffffff
+
+// Typed allocators: cast the block to a pointer to a large array and take
+// a subslice (D19). A table type (Token, Node, …) gets its own alloc_*
+// next to its declaration, written the same way.
+pub fn alloc_u8(a: *mut Arena, n: i32): ![]u8 {
+    let p = cast(*mut [MAX_LEN]u8, alloc_addr(a, cast(i64, n))!)
+    return (*p)[:n]
+}
+
+pub fn alloc_i32(a: *mut Arena, n: i32): ![]i32 {
+    let p = cast(*mut [MAX_LEN]i32, alloc_addr(a, cast(i64, n) * 4)!)
+    return (*p)[:n]
+}
+
+pub fn alloc_i64(a: *mut Arena, n: i32): ![]i64 {
+    let p = cast(*mut [MAX_LEN]i64, alloc_addr(a, cast(i64, n) * 8)!)
+    return (*p)[:n]
+}
+
+// []u8 is 16 bytes ({ptr, len}, C7.5). Used by os.args.
+pub fn alloc_slices_u8(a: *mut Arena, n: i32): ![][]u8 {
+    let p = cast(*mut [MAX_LEN][]u8, alloc_addr(a, cast(i64, n) * 16)!)
+    return (*p)[:n]
+}
+
+pub fn mark(a: *mut Arena): i64 {
+    return (*a).used
+}
+
+// Zeroes [m, used), then used = m (C8.4): every alloc_* result is zeroed (D6).
+pub fn reset(a: *mut Arena, m: i64) {
+    if m < 0 || m >= (*a).used {
+        return
+    }
+    let p = cast(*mut [MAX_LEN]u8, (*a).base + m)
+    let n = (*a).used - m
+    let mut i: i64 = 0
+    while i < n {
+        (*p)[i] = 0
+        i = i + 1
+    }
+    (*a).used = m
+}
+
+// munmap the whole range; the arena is empty (cap 0) afterwards.
+pub fn free_all(a: *mut Arena) {
+    if (*a).base == 0 {
+        return
+    }
+    let r = sys.call6(sys.NR_MUNMAP, (*a).base, (*a).cap, 0, 0, 0, 0)
+    (*a).base = 0
+    (*a).used = 0
+    (*a).cap = 0
+}
