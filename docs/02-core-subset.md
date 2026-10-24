@@ -813,3 +813,6 @@ PROPOSED, Marek decides:
 7. **Not supported yet** in the lowering: calls of body-less functions
    other than `sys.call6`, pointer arithmetic (the checker rejects it
    today anyway), > 60 call arguments, > 64 multi-assignment targets.
+8. **`argv[0]` under `kliner-run` is the `.kl` path** (the program
+   sees `prog.kl a b` where the native binary sees `./prog a b`), and
+   the interpreter caps the call depth at 10 000 (traps beyond).
