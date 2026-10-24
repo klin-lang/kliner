@@ -1,0 +1,264 @@
+// module ast — the syntax tree as tables (docs/02-core-subset.md C2 data
+// model, stage 3).
+//
+// A node is a fixed record: kind, the token that gives its position
+// (`tok`, an index into the lexer's token table) and four i32 fields
+// a, b, c, extra. Fields hold node indices, token indices, small flags or
+// -1 for "absent". Every variable-length list lives in the side array
+// `kids` as a count followed by the items: a list field holds the index
+// of the count, so kids[l] = n and the items are kids[l + 1 .. l + n].
+// Names are not copied: a name is the text of its token.
+//
+// The layout of every kind (what a, b, c, extra mean) is documented on
+// the variant below; `tok` is always the token whose line:column Klin
+// reports for that node, so error positions and the dump match Klin's
+// parser. Types are nodes too (T* kinds); the dump prints them as the
+// type strings of Klin's parser.
+module ast
+import arena
+
+pub enum Nk: u8 {
+    // a = `module` name tok or -1, extra = list(imports..., decls...)
+    Unit
+    // tok = `import`, a = spec tok (ident or string), b = alias tok or -1
+    Import
+    // tok = first token of the declaration (attrs or `pub` or keyword),
+    // a = Struct/Enum/Const/Global/Fn node, b = flags (1 pub, 2 async),
+    // extra = list(Attr)
+    Decl
+    // tok = name, a = string tok or -1
+    Attr
+    // tok = `struct`, a = name tok, extra = list(Field)
+    Struct
+    // tok = name, a = type
+    Field
+    // tok = `enum`, a = name tok, b = base type or -1, extra = list(Variant)
+    Enum
+    // tok = name, a = value or -1
+    Variant
+    // tok = `const`, a = name tok, b = type, c = value
+    Const
+    // tok = `let`, a = name tok, b = type, c = value or -1, extra = 1 if mut
+    Global
+    // tok = `fn`, a = name tok, b = associated-type tok (`T.f`) or -1,
+    // c = Sig, extra = body Block or -1 (cimport, sys intrinsic)
+    Fn
+    // a = Recv or -1, b = return type or -1, extra = list(Param)
+    Sig
+    // tok = name, a = type, b = 1 if `mut`
+    Recv
+    // tok = name, a = type
+    Param
+
+    // statements
+    // tok = `{`, extra = list(statements)
+    Block
+    // tok = `asm`, a = string tok
+    Asm
+    // tok = name, a = type or -1, b = value or -1, c = flags (1 mut, 2 `:=`)
+    Let
+    // tok = `let`, a = value, b = 1 if mut, extra = list(field tok, name tok)
+    LetStruct
+    // tok = `let`, a = value, b = 1 if mut, extra = list(name tok; `_` too)
+    LetArray
+    // tok = target's tok, a = target, b = value, c = op tok (`+=`…) or -1
+    Assign
+    // tok = first target's tok, a = target count,
+    // extra = list(targets..., values...)
+    MultiAssign
+    // tok = `{`, a = value, extra = list(field tok, target) — a target
+    // written without `: expr` is a synthetic Name on the field token
+    StructAssign
+    // a = Call / MCall / Await used as a statement; tok = its tok
+    ExprStmt
+    // tok = `if`, a = cond, b = Block, c = else Block / If or -1
+    If
+    // tok = `while`, a = cond, b = Block
+    While
+    // tok = `for`, a = name tok, b = start, c = end, extra = Block
+    ForRange
+    // tok = `for`, a = flags (1 init `:=`), b = post op tok (`=`, `+=`,
+    // `-=`) or -1, extra = list(init name tok, init, cond, post name tok,
+    // post, Block), each -1 when absent
+    ForC
+    // tok = `return`, a = value or -1
+    Return
+    Break
+    Continue
+    // tok = `defer`, a = statement
+    Defer
+    // tok = `match`, a = subject, extra = list(Arm)  (statement arms)
+    Match
+    // tok = pattern's tok, a = pattern, b = guard or -1, c = Block or expr
+    Arm
+    // tok = first value's tok, extra = list(values)
+    PatLit
+    // tok = `..=`, a = start, b = end
+    PatRange
+    // tok = operator, a = rhs
+    PatRel
+    PatWild
+    PatElse
+
+    // expressions; tok alone holds the literal or the name
+    Int
+    Float
+    Bool
+    Str
+    Bytes
+    Name
+    // tok = member, a = object
+    Get
+    // tok = member, a = receiver, extra = list(args)
+    MCall
+    // tok = type name, a = module tok or -1, b = 1 if named,
+    // extra = list(field tok, value) when named, else list(values)
+    StructLit
+    // tok = module tok or callee tok, a = module tok or -1, b = callee
+    // tok, extra = list(args)
+    Call
+    // tok = operator, a = operand
+    Unary
+    // tok = `[`, a = object, b = index
+    Index
+    // tok = `[`, a = object, b = start or -1, c = end or -1
+    Slice
+    // tok = `[`, extra = list(elements)
+    Array
+    // tok = `cast`, a = type, b = value
+    Cast
+    // tok = operator, a = left, b = right
+    Binary
+    // tok = `(`, a = inner
+    Group
+    // tok = `error`, a = code
+    ErrorE
+    // tok = `!`, a = operand
+    Propagate
+    // tok = `await`, a = operand
+    Await
+    // tok = `or`, a = operand, b = OrBlock
+    Or
+    // tok = `{`, a = final value, extra = list(statements)
+    OrBlock
+    // tok = `match`, a = subject, extra = list(Arm)  (expression arms)
+    MatchE
+    // tok = `pick`, a = cond, b = then, c = else
+    Pick
+
+    // types
+    // tok = first ident, a = second ident tok (`mod.T`) or -1
+    TName
+    // tok = `*`, a = element, b = flags (1 mut, 2 volatile)
+    TPtr
+    // tok = `[`, a = element
+    TSlice
+    // tok = `[`, a = length expr, b = element, c = first token of the
+    // length, extra = token after it (for the dump: Klin's type string)
+    TArray
+    // tok = `!`, a = value type
+    TErr
+    // tok = `fn`, a = return type or -1, extra = list(parameter types)
+    TFn
+}
+
+pub struct Node {
+    kind: Nk
+    tok: i32
+    a: i32
+    b: i32
+    c: i32
+    extra: i32
+}
+
+// The tree of one file. Tables grow by doubling (allocate, copy; the old
+// table stays in the arena until free_all). `stack` holds list items
+// while a list is being parsed (nested lists push on top).
+pub struct Ast {
+    nodes: []Node
+    n: i32
+    kids: []i32
+    nk: i32
+    stack: []i32
+    sp: i32
+    root: i32
+}
+
+pub fn alloc_nodes(a: *mut arena.Arena, n: i32): ![]Node {
+    let two: [2]Node
+    let size = cast(i64, &two[1]) - cast(i64, &two[0])
+    let p = cast(*mut [arena.MAX_LEN]Node, arena.alloc_addr(a, size * cast(i64, n))!)
+    return (*p)[:n]
+}
+
+pub fn Ast.new(a: *mut arena.Arena, ntok: i32): !Ast {
+    let mut t: Ast
+    t.nodes = alloc_nodes(a, ntok + 16)!
+    t.kids = arena.alloc_i32(a, ntok + 16)!
+    t.stack = arena.alloc_i32(a, 256)!
+    t.root = -1
+    return t
+}
+
+// Appends a node, returns its index.
+pub fn add(t: *mut Ast, a: *mut arena.Arena, kind: Nk, tok: i32, x: i32, y: i32, z: i32, extra: i32): !i32 {
+    if (*t).n == (*t).nodes.len {
+        let mut bigger = alloc_nodes(a, (*t).n * 2)!
+        for i in 0..<(*t).n {
+            bigger[i] = (*t).nodes[i]
+        }
+        (*t).nodes = bigger
+    }
+    let i = (*t).n
+    (*t).nodes[i].kind = kind
+    (*t).nodes[i].tok = tok
+    (*t).nodes[i].a = x
+    (*t).nodes[i].b = y
+    (*t).nodes[i].c = z
+    (*t).nodes[i].extra = extra
+    (*t).n += 1
+    return i
+}
+
+fn grow(a: *mut arena.Arena, s: []i32, n: i32): ![]i32 {
+    let mut bigger = arena.alloc_i32(a, s.len * 2 + n)!
+    for i in 0..<s.len {
+        bigger[i] = s[i]
+    }
+    return bigger
+}
+
+// Pushes a list item (node or token index) on the stack.
+pub fn push(t: *mut Ast, a: *mut arena.Arena, v: i32): !i32 {
+    if (*t).sp == (*t).stack.len {
+        (*t).stack = grow(a, (*t).stack, 0)!
+    }
+    (*t).stack[(*t).sp] = v
+    (*t).sp += 1
+    return 0
+}
+
+// Moves stack[base:sp] into kids as a list; returns the list index.
+pub fn list(t: *mut Ast, a: *mut arena.Arena, base: i32): !i32 {
+    let n = (*t).sp - base
+    if (*t).nk + n + 1 > (*t).kids.len {
+        (*t).kids = grow(a, (*t).kids, n + 1)!
+    }
+    let l = (*t).nk
+    (*t).kids[l] = n
+    for i in 0..<n {
+        (*t).kids[l + 1 + i] = (*t).stack[base + i]
+    }
+    (*t).nk += n + 1
+    (*t).sp = base
+    return l
+}
+
+pub fn count(t: *mut Ast, l: i32): i32 {
+    return (*t).kids[l]
+}
+
+// Item i (from 0) of list l.
+pub fn item(t: *mut Ast, l: i32, i: i32): i32 {
+    return (*t).kids[l + 1 + i]
+}

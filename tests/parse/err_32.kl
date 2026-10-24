@@ -1,0 +1,3 @@
+fn f() {
+    let x = Point{a: 1, 2}
+}

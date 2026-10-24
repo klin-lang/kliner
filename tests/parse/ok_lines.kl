@@ -1,0 +1,18 @@
+// line rules: `*` and a call's `(` must be on the operator's line;
+// other binary operators continue on the next line
+fn lines(a: i32, b: i32): i32 {
+    let m = a
+    *ptr = 3
+    let k = f
+    (b).go()
+    let s = a
+        + b
+        - 1
+    let t = log(a)
+    -1
+    let u = g(
+        a,
+        b * 2)
+    return a
+        && b
+}

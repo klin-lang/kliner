@@ -158,7 +158,7 @@ Rejected:
 - explicit width on every op (`u8`, `i32`, `i64`, …)
 - **no SSA**
 
-An IR interpreter is used for golden tests (see roadmap stage 3).
+An IR interpreter is used for golden tests (see roadmap stage 5).
 
 ---
 

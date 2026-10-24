@@ -1,0 +1,211 @@
+unit module=-
+  import @3:1 spec="geo" path=0 alias=-
+  fn @4:1 name="exprs" npos=@4:4 pub=0 async=0 assoc=- ret="!i32"
+    param @4:10 name="a" type="i32"
+    param @4:18 name="b" type="i32"
+    param @4:26 name="s" type="[]u8"
+    block @4:41
+      let @5:9 name="p" mut=0 short=0 type=-
+        binary @5:23 op="-"
+          binary @5:15 op="+"
+            name @5:13 v="a"
+            binary @5:19 op="*"
+              name @5:17 v="b"
+              int @5:21 v="2"
+          binary @5:37 op="%"
+            binary @5:33 op="/"
+              group @5:25
+                binary @5:28 op="-"
+                  name @5:26 v="a"
+                  name @5:30 v="b"
+              int @5:35 v="3"
+            int @5:39 v="4"
+      let @6:9 name="q" mut=0 short=0 type=-
+        binary @6:20 op="|"
+          binary @6:15 op="<<"
+            name @6:13 v="a"
+            int @6:18 v="2"
+          binary @6:33 op="^"
+            binary @6:29 op="&"
+              binary @6:24 op=">>"
+                name @6:22 v="b"
+                int @6:27 v="1"
+              int @6:31 v="3"
+            name @6:35 v="a"
+      let @7:9 name="r" mut=0 short=0 type=-
+        binary @7:58 op="||"
+          binary @7:48 op="||"
+            binary @7:29 op="||"
+              binary @7:19 op="&&"
+                binary @7:15 op="<"
+                  name @7:13 v="a"
+                  name @7:17 v="b"
+                binary @7:24 op="<="
+                  name @7:22 v="b"
+                  int @7:27 v="3"
+              binary @7:38 op="&&"
+                binary @7:34 op=">"
+                  name @7:32 v="a"
+                  int @7:36 v="1"
+                binary @7:43 op=">="
+                  name @7:41 v="a"
+                  int @7:46 v="2"
+            binary @7:53 op="=="
+              name @7:51 v="a"
+              name @7:56 v="b"
+          binary @7:63 op="!="
+            name @7:61 v="a"
+            name @7:66 v="b"
+      let @8:9 name="u" mut=0 short=0 type=-
+        binary @8:34 op="+"
+          binary @8:27 op="+"
+            binary @8:22 op="+"
+              binary @8:16 op="+"
+                unary @8:13 op="-"
+                  name @8:14 v="a"
+                unary @8:18 op="!"
+                  name @8:19 v="ok"
+              unary @8:24 op="~"
+                name @8:25 v="b"
+            unary @8:29 op="*"
+              name @8:30 v="ptr"
+          unary @8:36 op="&"
+            name @8:37 v="x"
+      let @9:9 name="n" mut=0 short=0 type=-
+        binary @9:21 op="*"
+          group @9:13
+            binary @9:16 op="+"
+              int @9:14 v="1"
+              int @9:18 v="2"
+          int @9:23 v="3"
+      let @10:9 name="lits" mut=0 short=0 type=-
+        array @10:16
+          int @10:17 v="1"
+          int @10:20 v="0x1f"
+          int @10:26 v="0b101"
+          int @10:33 v="0o17"
+          int @10:39 v="1_000"
+          float @10:46 v="2.5"
+          int @10:51 v="'a'"
+          int @10:56 v="'\\n'"
+          bool @10:62 v=true
+          bool @10:68 v=false
+      let @11:9 name="t" mut=0 short=0 type=-
+        str @11:13 v="plain $ text \\ \x22q\x22"
+      let @12:9 name="bs" mut=0 short=0 type=-
+        bytes @12:14 v="bytes\x00\x09"
+      let @13:9 name="el" mut=0 short=0 type=-
+        index @13:15
+          name @13:14 v="s"
+          int @13:16 v="1"
+      let @14:9 name="sl" mut=0 short=0 type=-
+        slice @14:15 start=1 end=1
+          name @14:14 v="s"
+          int @14:16 v="1"
+          int @14:18 v="3"
+      let @15:9 name="s2" mut=0 short=0 type=-
+        slice @15:15 start=0 end=1
+          name @15:14 v="s"
+          int @15:17 v="2"
+      let @16:9 name="s3" mut=0 short=0 type=-
+        slice @16:15 start=1 end=0
+          name @16:14 v="s"
+          int @16:16 v="2"
+      let @17:9 name="s4" mut=0 short=0 type=-
+        slice @17:15 start=0 end=0
+          name @17:14 v="s"
+      let @18:9 name="c" mut=0 short=0 type=-
+        binary @18:26 op="+"
+          cast @18:13 type="i64"
+            name @18:23 v="a"
+          cast @18:28 type="*mut u8"
+            name @18:42 v="s"
+      let @19:9 name="pt" mut=0 short=0 type=-
+        struct-lit @19:14 mod=- type="Point" named=1 fields="x,y"
+          int @19:23 v="1"
+          int @19:29 v="2"
+      let @20:9 name="pp" mut=0 short=0 type=-
+        struct-lit @20:14 mod=- type="Point" named=0 fields=""
+          int @20:20 v="1"
+          int @20:23 v="2"
+      let @21:9 name="gp" mut=0 short=0 type=-
+        struct-lit @21:18 mod="geo" type="Point" named=1 fields="x,y"
+          int @21:27 v="0"
+          int @21:33 v="0"
+      let @22:9 name="e" mut=0 short=0 type=-
+        struct-lit @22:13 mod=- type="Point" named=0 fields=""
+      let @23:9 name="v" mut=0 short=0 type=-
+        propagate @23:17
+          call @23:13 mod=- name="f"
+            int @23:15 v="1"
+      let @24:9 name="w" mut=0 short=0 type=-
+        or @24:18
+          call @24:13 mod=- name="g"
+            name @24:15 v="a"
+          or-block @24:21 n=0
+            int @24:23 v="0"
+      let @25:9 name="z" mut=0 short=0 type=-
+        or @25:17
+          call @25:13 mod=- name="h"
+          or-block @25:20 n=1
+            call @26:9 mod=- name="log"
+              name @26:13 v="err"
+            int @27:9 v="0"
+      let @29:9 name="pk" mut=0 short=0 type=-
+        pick @29:14
+          binary @29:21 op=">"
+            name @29:19 v="a"
+            name @29:23 v="b"
+          name @29:27 v="a"
+          name @29:33 v="b"
+      let @30:9 name="mc" mut=0 short=0 type=-
+        mcall @30:28 name="t"
+          index @30:24
+            get @30:23 name="s"
+              mcall @30:18 name="r"
+                get @30:16 name="q"
+                  name @30:14 v="p"
+                int @30:20 v="1"
+            int @30:25 v="2"
+      let @31:9 name="fc" mut=0 short=0 type=-
+        call @31:14 mod="geo" name="dist"
+          name @31:23 v="a"
+          name @31:26 v="b"
+      let @32:9 name="nest" mut=0 short=0 type=-
+        call @32:16 mod=- name="f"
+          call @32:18 mod=- name="g"
+            call @32:20 mod=- name="h"
+              int @32:22 v="1"
+          array @32:27
+            int @32:28 v="2"
+            int @32:31 v="3"
+          struct-lit @32:35 mod=- type="Point" named=1 fields="x"
+            int @32:44 v="4"
+      if @33:5
+        binary @33:10 op="=="
+          name @33:8 v="a"
+          get @33:27 name="x"
+            group @33:13
+              struct-lit @33:14 mod=- type="Point" named=1 fields="x"
+                int @33:23 v="1"
+        block @33:29
+      if @35:5
+        binary @35:13 op=">"
+          get @35:11 name="x"
+            name @35:8 v="pt"
+          int @35:15 v="0"
+        block @35:17
+      let @38:9 name="m" mut=0 short=0 type=-
+        name @38:13 v="a"
+      assign @39:5 op=-
+        unary @39:5 op="*"
+          name @39:6 v="ptr"
+        int @39:12 v="3"
+      let @41:9 name="k" mut=0 short=0 type=-
+        name @41:13 v="f"
+      mcall @42:9 name="go"
+        group @42:5
+          name @42:6 v="b"
+      return @43:5
+        error @43:12
+          int @43:18 v="5"

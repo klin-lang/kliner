@@ -1,0 +1,4 @@
+// module sys: declarations without a body (rt/linux_x86_64/sys.kl)
+module sys
+pub fn call6(nr: i64, a: i64, b: i64, c: i64, d: i64, e: i64, f: i64): i64
+fn exit(code: i32)

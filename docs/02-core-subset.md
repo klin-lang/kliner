@@ -108,13 +108,42 @@ fastest and simplest:
 This is the Zig / Carbon "data-oriented AST" layout. It also makes
 stage2 == stage3 easier: no pointer values end up in output.
 
+### AST — PROPOSED
+
+The stage 3 parser follows the data model above (`src/ast.kl`):
+
+- `Node {kind: Nk, tok, a, b, c, extra: i32}` in `nodes: []Node`;
+  children lists in `kids: []i32` as a count followed by the items (a
+  list field holds the index of the count). Lists are built on a
+  scratch stack and copied to `kids` when complete, so nested lists
+  never interleave. Both tables double when full.
+- **`tok` is one field more than `{kind, a, b, c, extra}`:** the index
+  of the token whose `line:col` Klin reports for the node. Without it
+  most kinds would spend one of `a`/`b`/`c` on the position, and a few
+  (`Call`, `ForC`, `Let`) would need an extra list. Names are never
+  copied: a name is the text of its token. Alternative: no `tok`, the
+  position in `a` where needed — smaller nodes (20 instead of 24
+  bytes), more irregular layouts. Suggestion: keep `tok`.
+- Types are nodes (`TName`, `TPtr`, `TSlice`, `TArray`, `TErr`,
+  `TFn`); an array length keeps its token range for the checker.
+- A declaration is wrapped in `Decl` (attributes, `pub`, `async`).
+- Parser state is a struct reached as `*mut Parser` (lexer, AST,
+  arena, diagnostics, flags such as "no struct literal here"); no
+  globals (C7.3).
+- Diagnostics (`src/diag.kl`, shared by the lexer and the parser):
+  `Diag {path, src, lines, failed, off, msg, note}`; the first error
+  wins (Klin's parser stops there too); printed as
+  `path:line:col: message` plus an optional `note:` line. Lexer and
+  parser messages are Klin's text, so the comparison can be exact;
+  explanations for features Kliner does not have yet go to the note.
+
 ---
 
 ## C3. LATER
 
 | Feature | Why later |
 |---|---|
-| `float` / `f32` / `f64` | The compiler does not need floats. Add with SSE2 / FP regs in stage 5+ |
+| `float` / `f32` / `f64` | The compiler does not need floats. Add with SSE2 / FP regs in stage 7+ |
 | `pick` | Sugar over `if`; trivial once `match` exists |
 | String interpolation `"$x"` / `${e}` | Lowers to `printf` / `snprintf` in Klin. Kliner needs its own formatter first |
 | `printf` / `puts` builtins | libc. Kliner maps `puts(str)` to `out` (C6); full `printf` later or never |
@@ -176,6 +205,26 @@ Still open on Klin main (probed on `d7625f1`), none blocking:
 - `str` cannot be measured, indexed or cast to an integer (C9.2).
 - `b"…"` reaching a mutable binding through a parameter or a return is
   still UB (C8.1).
+
+Found while writing the parser (stage 3, Klin `d7625f1`), none blocking:
+
+- `f()!` is not a statement (``expected assignment `=` or call``), and
+  `let _ = f()!` twice in a scope is ``redeclaration of `_` ``. The
+  parser uses `let mut ok = 0` once per function and `ok = f()!`.
+- `let mut x = b"fn"` is a checker error even if `x` is only
+  reassigned, never written through (`cannot bind read-only bytes to a
+  mutable slice`). Workaround: `src[0:0]` as the empty start value, or
+  a table lookup.
+- Diagnostics in an imported module carry the wrong file: a checker
+  error in `m.kl` prints `main.kl:3:12: …`, a parse error prints
+  `main.kl:/abs/path/m.kl:2:10: …` (two directories `a/`, `b/` with
+  `module m` + `main.kl` importing it; `return true` in an `i32` fn,
+  resp. a parameter named `module`).
+- Language behaviour to know (not a bug): only `*` and a call's `(`
+  must be on the operator's line. `log(err)` followed by `-1` on the
+  next line is `log(err) - 1`, and `xs` followed by `{ x, y } = p` on
+  the next line is a struct literal `xs{ x, y }`
+  (`tests/parse/ok_lines.kl`).
 
 ---
 
@@ -489,7 +538,7 @@ D6), then `o.fd = 1`.
 
 ### Intrinsics Kliner must provide
 
-The complete list of things the core cannot express (stage 4). Address →
+The complete list of things the core cannot express (stage 6). Address →
 slice is core Klin since D19 (`cast(*mut [N]T, addr)`, `(*p)[:n]`): Kliner
 must support that cast and the subslice, not an intrinsic.
 
@@ -638,3 +687,40 @@ changes C7 until he decides.
    form. Allocating a `[]Token` in the arena is plain Klin since G13 is
    fixed (#358, C6 `arena`); struct-of-arrays (`[]u8` / `[]i32` columns)
    stays a valid fallback.
+
+---
+
+## C10. `$fn` and string interpolation — PROPOSED
+
+Stage 3 parses Klin without these two features; Marek decides later.
+Today a file with `$` outside a string or comment fails in the lexer
+with Klin's message (``unexpected character `$` ``) plus a note, and a
+string with an unescaped `$` fails in the parser (`string
+interpolation is not supported by Kliner yet` + note). `\$` is a
+literal `$` and works.
+
+1. **`$fn` generics, `$name(...)` expansion.** Klin rewrites the source
+   text before lexing (`lib/preprocess.dart`: expands `$fn` per
+   instantiation, also SVD / `ioc` rewrites).
+   - *(a) Pre-pass like Klin:* text → text before the lexer. Same
+     semantics and errors as Klin for free; positions after an
+     expansion need a map back to the original; a second "language"
+     inside the compiler.
+   - *(b) `$` tokens + generic declarations in the AST:* `$fn` becomes
+     a `Fn` with type parameters, instantiation happens in the checker
+     (on demand, per type list). Proper positions and errors, no text
+     rewriting; more checker work (stage 4), and the result must be
+     identical to Klin's expansion.
+   - *(c) Not in Kliner sources:* the compiler does not need generics
+     (C1); keep rejecting `$` until after self-hosting.
+   - Suggestion: (c) for the compiler itself, (b) when Kliner compiles
+     user programs.
+2. **String interpolation `"a $x ${e}"`.** Klin's lexer keeps the
+   `$` in the string token; the parser splits it into parts
+   (`InterpolatedStringExpr` with `InterpText` / `InterpSlot` parts).
+   - *(a) Parser splits the token* into literal parts + expressions
+     (sub-lexing the `${…}` text), node `Interp {extra = parts}`. Same
+     as Klin; needs a formatting runtime (`out.dec`, …) in the backend.
+   - *(b) Not in the core:* Kliner sources use `out.lit` / `out.dec`;
+     interpolation only for user programs, after self-hosting.
+   - Suggestion: (b) now, (a) together with a `fmt` runtime.

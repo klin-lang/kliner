@@ -1,0 +1,1402 @@
+// module parse — Klin parser for Kliner (stage 3, docs/01-roadmap.md).
+//
+// Tokens (module lex) in, an ast.Ast table out. A recursive-descent port
+// of Klin's parser (klin lib/parser.dart, main d7625f1): same grammar,
+// same node positions, same error messages, fail-fast on the first error
+// like Klin's CLI. scripts/test.sh compares the AST dumps of both parsers
+// (tools/kliner-parse vs tools/klin-parse.dart).
+//
+// Not supported yet (Marek's decision, docs/02-core-subset.md C10):
+// `$fn` generics (the lexer rejects `$` with a note) and string
+// interpolation `"…$x…"` (rejected here with a note). One intended
+// difference: in module `sys` a function may have no body (the
+// target intrinsic `sys.call6`, C6); Klin requires a body.
+//
+// No globals: all state is in a `Parser` reached through `*mut`; memory
+// comes from the caller's arena.
+//
+// `f()!` is not a statement in Klin (docs/02-core-subset.md C5), so a
+// function that calls `!T` helpers only for their error starts with
+// `let mut ok = 0` and writes `ok = f()!`.
+module parse
+import arena
+import ast
+import diag
+import lex
+
+pub struct Parser {
+    lx: *mut lex.Lexer
+    d: *mut diag.Diag
+    t: *mut ast.Ast
+    a: *mut arena.Arena
+    i: i32 // current token
+    no_struct: bool // `T {` is not a struct literal (if/while/match headers)
+    paren: i32 // inside ( ) of a call, group, cast or error(…)
+    in_sys: bool // `module sys`: body-less fn allowed
+    quals: [][]u8 // import qualifiers (`mod` in `mod.f()`)
+    nq: i32
+}
+
+pub fn Parser.new(lx: *mut lex.Lexer, d: *mut diag.Diag, t: *mut ast.Ast, a: *mut arena.Arena): Parser {
+    let mut p: Parser
+    p.lx = lx
+    p.d = d
+    p.t = t
+    p.a = a
+    return p
+}
+
+// ---- tokens ----
+
+fn kind_at(p: *mut Parser, i: i32): lex.Tok {
+    let toks = (*(*p).lx).toks
+    let mut j = i
+    if j >= toks.len {
+        j = toks.len - 1
+    }
+    return toks[j].kind
+}
+
+fn cur(p: *mut Parser): lex.Tok {
+    return kind_at(p, (*p).i)
+}
+
+fn check(p: *mut Parser, k: lex.Tok): bool {
+    return cur(p) == k
+}
+
+fn next_is(p: *mut Parser, k: lex.Tok): bool {
+    return kind_at(p, (*p).i + 1) == k
+}
+
+// Current token index; moves on (never past Eof).
+fn advance(p: *mut Parser): i32 {
+    let i = (*p).i
+    if cur(p) != lex.Tok.Eof {
+        (*p).i += 1
+    }
+    return i
+}
+
+fn text(p: *mut Parser, tok: i32): []u8 {
+    return lex.text((*p).lx, tok)
+}
+
+fn is_text(p: *mut Parser, tok: i32, s: []u8): bool {
+    return lex.eq(text(p, tok), s)
+}
+
+fn line(p: *mut Parser, tok: i32): i32 {
+    return diag.line((*p).d, (*(*p).lx).toks[tok].start)
+}
+
+fn fail(p: *mut Parser, tok: i32, msg: []u8): i32 {
+    return diag.fail((*p).d, (*(*p).lx).toks[tok].start, msg)
+}
+
+// msg + text of `arg` + tail, e.g. "duplicate field `" x "`".
+fn fail3(p: *mut Parser, tok: i32, msg: []u8, arg: i32, tail: []u8): i32 {
+    let e = fail(p, tok, msg)
+    diag.add((*p).d, text(p, arg))
+    diag.add((*p).d, tail)
+    return e
+}
+
+fn expect(p: *mut Parser, k: lex.Tok, msg: []u8): !i32 {
+    if !check(p, k) {
+        return error(fail(p, (*p).i, msg))
+    }
+    return advance(p)
+}
+
+// ---- tables ----
+
+fn node(p: *mut Parser, kind: ast.Nk, tok: i32, a: i32, b: i32, c: i32, extra: i32): !i32 {
+    return ast.add((*p).t, (*p).a, kind, tok, a, b, c, extra)
+}
+
+fn push(p: *mut Parser, v: i32): !i32 {
+    return ast.push((*p).t, (*p).a, v)
+}
+
+fn list(p: *mut Parser, base: i32): !i32 {
+    return ast.list((*p).t, (*p).a, base)
+}
+
+fn sp(p: *mut Parser): i32 {
+    return (*(*p).t).sp
+}
+
+fn nkind(p: *mut Parser, n: i32): ast.Nk {
+    return (*(*p).t).nodes[n].kind
+}
+
+fn ntok(p: *mut Parser, n: i32): i32 {
+    return (*(*p).t).nodes[n].tok
+}
+
+// ---- C keywords (Klin rejects them as names: it emits C) ----
+
+fn is_c_keyword(s: []u8): bool {
+    let words = b"auto break case char const continue default do double else enum extern float for goto if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while _Alignas _Alignof _Atomic _Bool _Complex _Generic _Imaginary _Noreturn _Static_assert _Thread_local bool true false nullptr typeof typeof_unqual "
+    let mut start = 0
+    for i in 0..<words.len {
+        if words[i] == ' ' {
+            if lex.eq(words[start:i], s) {
+                return true
+            }
+            start = i + 1
+        }
+    }
+    return false
+}
+
+// role: "a struct name", "a call name", …
+fn reject_c(p: *mut Parser, tok: i32, role: []u8): !i32 {
+    if is_c_keyword(text(p, tok)) {
+        let e = fail3(p, tok, b"`", tok, b"` is a C keyword and cannot be ")
+        diag.add((*p).d, role)
+        return error(e)
+    }
+    return 0
+}
+
+// ---- unit ----
+
+// Parses the whole file into (*p).t; root = the Unit node.
+pub fn run(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let first = (*p).i
+    let mut name = -1
+    if check(p, lex.Tok.Module) {
+        advance(p)
+        name = expect(p, lex.Tok.Ident, b"expected module name")!
+        (*p).in_sys = is_text(p, name, b"sys")
+    }
+    (*p).quals = arena.alloc_slices_u8((*p).a, 16)!
+    let base = sp(p)
+    while check(p, lex.Tok.Import) {
+        ok = push(p, import_spec(p)!)!
+    }
+    let mut ndecl = 0
+    while !check(p, lex.Tok.Eof) {
+        ok = push(p, decl(p)!)!
+        ndecl += 1
+    }
+    if ndecl == 0 {
+        return error(fail(p, (*p).i, b"expected declaration"))
+    }
+    let l = list(p, base)!
+    (*(*p).t).root = node(p, ast.Nk.Unit, first, name, -1, -1, l)!
+    return (*(*p).t).root
+}
+
+fn add_qual(p: *mut Parser, q: []u8): !i32 {
+    if (*p).nq == (*p).quals.len {
+        let mut bigger = arena.alloc_slices_u8((*p).a, (*p).nq * 2)!
+        for i in 0..<(*p).nq {
+            bigger[i] = (*p).quals[i]
+        }
+        (*p).quals = bigger
+    }
+    (*p).quals[(*p).nq] = q
+    (*p).nq += 1
+    return 0
+}
+
+fn is_qual(p: *mut Parser, s: []u8): bool {
+    for i in 0..<(*p).nq {
+        if lex.eq((*p).quals[i], s) {
+            return true
+        }
+    }
+    return false
+}
+
+fn import_spec(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let kw = advance(p)
+    let mut spec = -1
+    let mut q = (*(*p).lx).src[0:0]
+    if check(p, lex.Tok.Str) {
+        spec = advance(p)
+        // qualifier: last path segment without `.kl`
+        let v = lex.str_value((*p).lx, (*p).a, spec)!
+        let mut end = v.len
+        if end >= 3 && lex.eq(v[end - 3:end], b".kl") {
+            end -= 3
+        }
+        let mut from = 0
+        for i in 0..<end {
+            if v[i] == '/' {
+                from = i + 1
+            }
+        }
+        q = v[from:end]
+    } else {
+        spec = expect(p, lex.Tok.Ident, b"expected imported module name or path")!
+        q = text(p, spec)
+    }
+    let mut alias = -1
+    if check(p, lex.Tok.Ident) {
+        alias = advance(p)
+        ok = reject_c(p, alias, b"an import alias")!
+        q = text(p, alias)
+    }
+    if q.len == 0 {
+        return error(fail(p, kw, b"import needs a module name"))
+    }
+    ok = add_qual(p, q)!
+    return node(p, ast.Nk.Import, kw, spec, alias, -1, -1)
+}
+
+fn decl(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let first = (*p).i
+    let base = sp(p)
+    let mut cimport = false
+    while check(p, lex.Tok.At) {
+        advance(p)
+        ok = expect(p, lex.Tok.LBracket, b"expected `[` after `@`")!
+        while true {
+            let name = expect(p, lex.Tok.Ident, b"expected attribute name")!
+            let mut arg = -1
+            if check(p, lex.Tok.LParen) {
+                advance(p)
+                arg = expect(p, lex.Tok.Str, b"expected attribute string")!
+                ok = expect(p, lex.Tok.RParen, b"expected `)` after attribute string")!
+            }
+            if is_text(p, name, b"cimport") {
+                cimport = true
+            }
+            ok = push(p, node(p, ast.Nk.Attr, name, arg, -1, -1, -1)!)!
+            if !check(p, lex.Tok.Comma) {
+                break
+            }
+            advance(p)
+        }
+        ok = expect(p, lex.Tok.RBracket, b"expected `]` after attributes")!
+    }
+    let attrs = list(p, base)!
+    let mut flags = 0
+    if check(p, lex.Tok.Pub) {
+        advance(p)
+        flags = 1
+    }
+    let mut d = -1
+    if check(p, lex.Tok.Struct) {
+        d = struct_decl(p)!
+    } else if check(p, lex.Tok.Enum) {
+        d = enum_decl(p)!
+    } else if check(p, lex.Tok.Const) {
+        d = const_decl(p)!
+    } else if check(p, lex.Tok.Let) {
+        d = global_decl(p)!
+    } else if check(p, lex.Tok.Async) {
+        advance(p)
+        if !check(p, lex.Tok.Fn) {
+            return error(fail(p, (*p).i, b"expected `fn` after `async`"))
+        }
+        flags += 2
+        d = func(p, true, cimport)!
+    } else if check(p, lex.Tok.Fn) {
+        d = func(p, false, cimport)!
+    } else {
+        return error(fail(p, (*p).i, b"expected struct, enum, const, let, or function declaration"))
+    }
+    return node(p, ast.Nk.Decl, first, d, flags, -1, attrs)
+}
+
+fn struct_decl(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let kw = advance(p)
+    let name = expect(p, lex.Tok.Ident, b"expected struct name")!
+    ok = reject_c(p, name, b"a struct name")!
+    ok = expect(p, lex.Tok.LBrace, b"expected `{`")!
+    let base = sp(p)
+    while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
+        // `x, y: T` — names first, then one type for all of them
+        let pend = sp(p)
+        while true {
+            let f = expect(p, lex.Tok.Ident, b"expected field name")!
+            ok = reject_c(p, f, b"a field name")!
+            ok = push(p, f)!
+            if check(p, lex.Tok.Colon) {
+                advance(p)
+                let ty = type_name(p)!
+                let mut j = pend
+                while j < sp(p) {
+                    let ft = (*(*p).t).stack[j]
+                    (*(*p).t).stack[j] = node(p, ast.Nk.Field, ft, ty, -1, -1, -1)!
+                    j += 1
+                }
+                break
+            }
+            ok = expect(p, lex.Tok.Comma, b"expected `,` or `:` after field name")!
+        }
+    }
+    ok = expect(p, lex.Tok.RBrace, b"expected `}`")!
+    let l = list(p, base)!
+    return node(p, ast.Nk.Struct, kw, name, -1, -1, l)
+}
+
+fn global_decl(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let kw = advance(p)
+    let mut m = 0
+    if check(p, lex.Tok.Mut) {
+        advance(p)
+        m = 1
+    }
+    if check(p, lex.Tok.LBrace) || check(p, lex.Tok.LBracket) {
+        return error(fail(p, (*p).i, b"module-level `let` binds one name"))
+    }
+    let name = expect(p, lex.Tok.Ident, b"expected global name")!
+    ok = reject_c(p, name, b"a global name")!
+    ok = expect(p, lex.Tok.Colon, b"expected `:` after global name")!
+    let ty = type_name(p)!
+    let mut init = -1
+    if check(p, lex.Tok.Eq) {
+        advance(p)
+        init = expr(p)!
+    }
+    return node(p, ast.Nk.Global, kw, name, ty, init, m)
+}
+
+fn const_decl(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let kw = advance(p)
+    let name = expect(p, lex.Tok.Ident, b"expected constant name")!
+    ok = reject_c(p, name, b"a constant name")!
+    ok = expect(p, lex.Tok.Colon, b"expected `:` after constant name")!
+    let ty = type_name(p)!
+    ok = expect(p, lex.Tok.Eq, b"expected `=` after constant type")!
+    let init = expr(p)!
+    return node(p, ast.Nk.Const, kw, name, ty, init, -1)
+}
+
+fn enum_decl(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let kw = advance(p)
+    let name = expect(p, lex.Tok.Ident, b"expected enum name")!
+    ok = reject_c(p, name, b"an enum name")!
+    let mut base_ty = -1
+    if check(p, lex.Tok.Colon) {
+        advance(p)
+        base_ty = type_name(p)!
+    }
+    ok = expect(p, lex.Tok.LBrace, b"expected `{`")!
+    let base = sp(p)
+    while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
+        let v = expect(p, lex.Tok.Ident, b"expected enum variant name")!
+        ok = reject_c(p, v, b"an enum variant")!
+        let mut value = -1
+        if check(p, lex.Tok.Eq) {
+            advance(p)
+            value = expr(p)!
+        }
+        ok = push(p, node(p, ast.Nk.Variant, v, value, -1, -1, -1)!)!
+        if check(p, lex.Tok.Comma) {
+            advance(p)
+        }
+    }
+    ok = expect(p, lex.Tok.RBrace, b"expected `}`")!
+    if sp(p) == base {
+        return error(fail3(p, kw, b"enum `", name, b"` must have at least one variant"))
+    }
+    let l = list(p, base)!
+    return node(p, ast.Nk.Enum, kw, name, base_ty, -1, l)
+}
+
+fn func(p: *mut Parser, is_async: bool, cimport: bool): !i32 {
+    let mut ok = 0
+    let kw = advance(p)
+    let mut recv = -1
+    if check(p, lex.Tok.LParen) {
+        advance(p)
+        let mut m = 0
+        if check(p, lex.Tok.Mut) {
+            advance(p)
+            m = 1
+        }
+        let rn = expect(p, lex.Tok.Ident, b"expected receiver name")!
+        ok = reject_c(p, rn, b"a receiver name")!
+        ok = expect(p, lex.Tok.Colon, b"expected `:` after receiver")!
+        let rt = type_name(p)!
+        ok = expect(p, lex.Tok.RParen, b"expected `)` after receiver")!
+        recv = node(p, ast.Nk.Recv, rn, rt, m, -1, -1)!
+    }
+    if is_async && recv >= 0 {
+        return error(fail(p, ntok(p, recv), b"async methods are not supported in MVP"))
+    }
+    let mut name = expect(p, lex.Tok.Ident, b"expected function name")!
+    ok = reject_c(p, name, b"a function name")!
+    let mut assoc = -1
+    if recv < 0 && check(p, lex.Tok.Dot) {
+        advance(p)
+        assoc = name
+        name = expect(p, lex.Tok.Ident, b"expected associated function name")!
+        ok = reject_c(p, name, b"a function name")!
+    }
+    if is_async && assoc >= 0 {
+        return error(fail(p, kw, b"async associated functions are not supported in MVP"))
+    }
+    ok = expect(p, lex.Tok.LParen, b"expected `(`")!
+    let base = sp(p)
+    if !check(p, lex.Tok.RParen) {
+        let mut pend = sp(p)
+        while true {
+            let pn = expect(p, lex.Tok.Ident, b"expected parameter name")!
+            ok = reject_c(p, pn, b"a parameter name")!
+            ok = push(p, pn)!
+            if check(p, lex.Tok.Colon) {
+                advance(p)
+                let ty = type_name(p)!
+                let mut j = pend
+                while j < sp(p) {
+                    let pt = (*(*p).t).stack[j]
+                    (*(*p).t).stack[j] = node(p, ast.Nk.Param, pt, ty, -1, -1, -1)!
+                    j += 1
+                }
+                pend = sp(p)
+                if check(p, lex.Tok.Comma) {
+                    advance(p)
+                    continue
+                }
+                break
+            }
+            ok = expect(p, lex.Tok.Comma, b"expected `,` or `:` after parameter name")!
+        }
+    }
+    ok = expect(p, lex.Tok.RParen, b"expected `)`")!
+    let params = list(p, base)!
+    let mut ret = -1
+    if check(p, lex.Tok.Colon) {
+        advance(p)
+        ret = type_name(p)!
+    }
+    if is_async && ret >= 0 {
+        return error(fail(p, kw, b"async fn MVP returns void — omit `: T` (issue 029)"))
+    }
+    let sig = node(p, ast.Nk.Sig, kw, recv, ret, -1, params)!
+    let mut body = -1
+    if !cimport && !((*p).in_sys && !check(p, lex.Tok.LBrace)) {
+        body = block(p)!
+    }
+    return node(p, ast.Nk.Fn, kw, name, assoc, sig, body)
+}
+
+// ---- statements ----
+
+fn block(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let open = expect(p, lex.Tok.LBrace, b"expected `{`")!
+    let base = sp(p)
+    while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
+        ok = push(p, stmt(p)!)!
+    }
+    ok = expect(p, lex.Tok.RBrace, b"expected `}`")!
+    let l = list(p, base)!
+    return node(p, ast.Nk.Block, open, -1, -1, -1, l)
+}
+
+fn stmt(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let k = cur(p)
+    if k == lex.Tok.Let {
+        return let_stmt(p)
+    }
+    if k == lex.Tok.If {
+        return if_stmt(p)
+    }
+    if k == lex.Tok.While {
+        let kw = advance(p)
+        let cond = header_expr(p)!
+        let body = block(p)!
+        return node(p, ast.Nk.While, kw, cond, body, -1, -1)
+    }
+    if k == lex.Tok.For {
+        return for_stmt(p)
+    }
+    if k == lex.Tok.Match {
+        return match_any(p, false)
+    }
+    if k == lex.Tok.Return {
+        let kw = advance(p)
+        let mut v = -1
+        if looks_like_return_value(p, kw) {
+            v = expr(p)!
+        }
+        return node(p, ast.Nk.Return, kw, v, -1, -1, -1)
+    }
+    if k == lex.Tok.Defer {
+        let kw = advance(p)
+        let body = stmt(p)!
+        return node(p, ast.Nk.Defer, kw, body, -1, -1, -1)
+    }
+    if k == lex.Tok.Asm {
+        let kw = advance(p)
+        ok = expect(p, lex.Tok.LParen, b"expected `(` after `asm`")!
+        let code = expect(p, lex.Tok.Str, b"expected asm instruction string")!
+        ok = expect(p, lex.Tok.RParen, b"expected `)` after the asm instruction")!
+        return node(p, ast.Nk.Asm, kw, code, -1, -1, -1)
+    }
+    if k == lex.Tok.Break {
+        return node(p, ast.Nk.Break, advance(p), -1, -1, -1, -1)
+    }
+    if k == lex.Tok.Continue {
+        return node(p, ast.Nk.Continue, advance(p), -1, -1, -1, -1)
+    }
+    if k == lex.Tok.LBrace {
+        if looks_like_struct_assign(p) {
+            return struct_assign(p)
+        }
+        return block(p)
+    }
+    if k == lex.Tok.Ident && next_is(p, lex.Tok.ColonEq) {
+        let name = advance(p)
+        ok = reject_c(p, name, b"a variable name")!
+        advance(p)
+        let init = expr(p)!
+        return node(p, ast.Nk.Let, name, -1, init, 3, -1)
+    }
+    if can_start_expr(k) {
+        let e = expr(p)!
+        return stmt_from_expr(p, e)
+    }
+    return error(fail(p, (*p).i, b"expected statement"))
+}
+
+fn can_start_expr(k: lex.Tok): bool {
+    let r = match k {
+        lex.Tok.Int, lex.Tok.Float, lex.Tok.Str, lex.Tok.Bytes, lex.Tok.True, lex.Tok.False { true }
+        lex.Tok.Ident, lex.Tok.LParen, lex.Tok.LBracket, lex.Tok.Minus, lex.Tok.Bang { true }
+        lex.Tok.Tilde, lex.Tok.Star, lex.Tok.Amp, lex.Tok.Cast, lex.Tok.Error { true }
+        lex.Tok.Match, lex.Tok.Pick { true }
+        else { false }
+    }
+    return r
+}
+
+fn looks_like_return_value(p: *mut Parser, kw: i32): bool {
+    if !can_start_expr(cur(p)) {
+        return false
+    }
+    if check(p, lex.Tok.Ident) && (*p).i + 1 < (*(*p).lx).toks.len {
+        let nx = kind_at(p, (*p).i + 1)
+        if nx == lex.Tok.Eq || nx == lex.Tok.ColonEq {
+            return false
+        }
+        if nx == lex.Tok.LParen && line(p, (*p).i) > line(p, kw) {
+            return false
+        }
+    }
+    return true
+}
+
+fn is_assignable(p: *mut Parser, e: i32): bool {
+    let k = nkind(p, e)
+    if k == ast.Nk.Name || k == ast.Nk.Get || k == ast.Nk.Index {
+        return true
+    }
+    return k == ast.Nk.Unary && is_text(p, ntok(p, e), b"*")
+}
+
+fn need_assignable(p: *mut Parser, e: i32): !i32 {
+    if !is_assignable(p, e) {
+        return error(fail(p, ntok(p, e), b"left side of assignment must be assignable"))
+    }
+    return 0
+}
+
+fn is_compound(k: lex.Tok): bool {
+    let r = match k {
+        lex.Tok.PlusEq, lex.Tok.MinusEq, lex.Tok.StarEq, lex.Tok.SlashEq, lex.Tok.PercentEq { true }
+        lex.Tok.AmpEq, lex.Tok.PipeEq, lex.Tok.CaretEq, lex.Tok.LtLtEq, lex.Tok.GtGtEq { true }
+        else { false }
+    }
+    return r
+}
+
+fn stmt_from_expr(p: *mut Parser, e: i32): !i32 {
+    let mut ok = 0
+    if check(p, lex.Tok.Comma) {
+        return multi_assign(p, e)
+    }
+    if check(p, lex.Tok.Eq) || is_compound(cur(p)) {
+        ok = need_assignable(p, e)!
+        let mut op = -1
+        if !check(p, lex.Tok.Eq) {
+            op = (*p).i
+        }
+        advance(p)
+        let v = expr(p)!
+        return node(p, ast.Nk.Assign, ntok(p, e), e, v, op, -1)
+    }
+    let k = nkind(p, e)
+    if k == ast.Nk.Call || k == ast.Nk.MCall || k == ast.Nk.Await {
+        return node(p, ast.Nk.ExprStmt, ntok(p, e), e, -1, -1, -1)
+    }
+    return error(fail(p, ntok(p, e), b"expected assignment `=` or call"))
+}
+
+fn multi_assign(p: *mut Parser, first: i32): !i32 {
+    let mut ok = 0
+    let base = sp(p)
+    ok = push(p, first)!
+    while check(p, lex.Tok.Comma) {
+        advance(p)
+        ok = push(p, expr(p)!)!
+    }
+    let nt = sp(p) - base
+    for j in 0..<nt {
+        ok = need_assignable(p, (*(*p).t).stack[base + j])!
+    }
+    ok = expect(p, lex.Tok.Eq, b"expected `=` in multi-assignment")!
+    ok = push(p, expr(p)!)!
+    while check(p, lex.Tok.Comma) {
+        advance(p)
+        ok = push(p, expr(p)!)!
+    }
+    let nv = sp(p) - base - nt
+    if nt != nv {
+        let e = fail(p, ntok(p, first), b"multi-assignment has ")
+        diag.add_dec((*p).d, nt)
+        diag.add((*p).d, b" targets but ")
+        diag.add_dec((*p).d, nv)
+        diag.add((*p).d, b" values")
+        return error(e)
+    }
+    let l = list(p, base)!
+    return node(p, ast.Nk.MultiAssign, ntok(p, first), nt, -1, -1, l)
+}
+
+fn looks_like_struct_assign(p: *mut Parser): bool {
+    let toks = (*(*p).lx).toks
+    let mut depth = 0
+    let mut j = (*p).i
+    while j < toks.len {
+        let k = toks[j].kind
+        if k == lex.Tok.LBrace {
+            depth += 1
+        } else if k == lex.Tok.RBrace {
+            depth -= 1
+            if depth == 0 {
+                return j + 1 < toks.len && toks[j + 1].kind == lex.Tok.Eq
+            }
+        } else if k == lex.Tok.Eof {
+            return false
+        }
+        j += 1
+    }
+    return false
+}
+
+// Is the text of tok equal to the text of a token at stack[from + step*k]?
+fn seen(p: *mut Parser, from: i32, step: i32, tok: i32): bool {
+    let mut j = from
+    while j < sp(p) {
+        if lex.eq(text(p, (*(*p).t).stack[j]), text(p, tok)) {
+            return true
+        }
+        j += step
+    }
+    return false
+}
+
+fn struct_assign(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let open = advance(p)
+    let base = sp(p)
+    if !check(p, lex.Tok.RBrace) {
+        while true {
+            let f = expect(p, lex.Tok.Ident, b"expected field name")!
+            if seen(p, base, 2, f) {
+                return error(fail3(p, f, b"duplicate field `", f, b"` in destructuring pattern"))
+            }
+            let mut target = -1
+            if check(p, lex.Tok.Colon) {
+                advance(p)
+                target = expr(p)!
+                ok = need_assignable(p, target)!
+            } else {
+                target = node(p, ast.Nk.Name, f, -1, -1, -1, -1)!
+            }
+            ok = push(p, f)!
+            ok = push(p, target)!
+            if check(p, lex.Tok.Comma) {
+                advance(p)
+                if check(p, lex.Tok.RBrace) {
+                    break
+                }
+                continue
+            }
+            break
+        }
+    }
+    ok = expect(p, lex.Tok.RBrace, b"expected `}` after destructuring pattern")!
+    if sp(p) == base {
+        return error(fail(p, open, b"destructuring pattern needs at least one field"))
+    }
+    ok = expect(p, lex.Tok.Eq, b"expected `=` in destructuring assignment")!
+    let src = expr(p)!
+    let l = list(p, base)!
+    return node(p, ast.Nk.StructAssign, open, src, -1, -1, l)
+}
+
+fn let_stmt(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let kw = advance(p)
+    let mut m = 0
+    if check(p, lex.Tok.Mut) {
+        advance(p)
+        m = 1
+    }
+    if check(p, lex.Tok.LBrace) {
+        return let_struct(p, kw, m)
+    }
+    if check(p, lex.Tok.LBracket) {
+        return let_array(p, kw, m)
+    }
+    let name = expect(p, lex.Tok.Ident, b"expected variable name")!
+    ok = reject_c(p, name, b"a variable name")!
+    let mut ty = -1
+    if check(p, lex.Tok.Colon) {
+        advance(p)
+        ty = type_name(p)!
+    }
+    let mut init = -1
+    if check(p, lex.Tok.Eq) {
+        advance(p)
+        init = expr(p)!
+    }
+    return node(p, ast.Nk.Let, name, ty, init, m, -1)
+}
+
+fn let_struct(p: *mut Parser, kw: i32, m: i32): !i32 {
+    let mut ok = 0
+    advance(p)
+    let base = sp(p)
+    if !check(p, lex.Tok.RBrace) {
+        while true {
+            let f = expect(p, lex.Tok.Ident, b"expected field name")!
+            if seen(p, base, 2, f) {
+                return error(fail3(p, f, b"duplicate field `", f, b"` in destructuring pattern"))
+            }
+            let mut bind = f
+            if check(p, lex.Tok.Colon) {
+                advance(p)
+                bind = expect(p, lex.Tok.Ident, b"expected local name after `:`")!
+            }
+            ok = reject_c(p, bind, b"a variable name")!
+            if seen(p, base + 1, 2, bind) {
+                return error(fail3(p, bind, b"duplicate name `", bind, b"` in destructuring pattern"))
+            }
+            ok = push(p, f)!
+            ok = push(p, bind)!
+            if check(p, lex.Tok.Comma) {
+                advance(p)
+                if check(p, lex.Tok.RBrace) {
+                    break
+                }
+                continue
+            }
+            break
+        }
+    }
+    ok = expect(p, lex.Tok.RBrace, b"expected `}` after destructuring pattern")!
+    if sp(p) == base {
+        return error(fail(p, kw, b"destructuring pattern needs at least one field"))
+    }
+    ok = expect(p, lex.Tok.Eq, b"expected `=` in destructuring `let`")!
+    let src = expr(p)!
+    let l = list(p, base)!
+    return node(p, ast.Nk.LetStruct, kw, src, m, -1, l)
+}
+
+fn let_array(p: *mut Parser, kw: i32, m: i32): !i32 {
+    let mut ok = 0
+    advance(p)
+    let base = sp(p)
+    let mut bound = 0
+    if !check(p, lex.Tok.RBracket) {
+        while true {
+            let name = expect(p, lex.Tok.Ident, b"expected binding name or `_`")!
+            if !is_text(p, name, b"_") {
+                ok = reject_c(p, name, b"a variable name")!
+                // `_` never clashes: it is skipped by the comparison below
+                let mut dup = false
+                for j in base..<sp(p) {
+                    let o = (*(*p).t).stack[j]
+                    if !is_text(p, o, b"_") && lex.eq(text(p, o), text(p, name)) {
+                        dup = true
+                    }
+                }
+                if dup {
+                    return error(fail3(p, name, b"duplicate name `", name, b"` in destructuring pattern"))
+                }
+                bound += 1
+            }
+            ok = push(p, name)!
+            if check(p, lex.Tok.Comma) {
+                advance(p)
+                if check(p, lex.Tok.RBracket) {
+                    break
+                }
+                continue
+            }
+            break
+        }
+    }
+    ok = expect(p, lex.Tok.RBracket, b"expected `]` after destructuring pattern")!
+    if sp(p) == base {
+        return error(fail(p, kw, b"destructuring pattern needs at least one binding"))
+    }
+    if bound == 0 {
+        return error(fail(p, kw, b"destructuring pattern binds nothing (all `_`)"))
+    }
+    ok = expect(p, lex.Tok.Eq, b"expected `=` in destructuring `let`")!
+    let src = expr(p)!
+    let l = list(p, base)!
+    return node(p, ast.Nk.LetArray, kw, src, m, -1, l)
+}
+
+fn if_stmt(p: *mut Parser): !i32 {
+    let kw = advance(p)
+    let cond = header_expr(p)!
+    let then = block(p)!
+    let mut els = -1
+    if check(p, lex.Tok.Else) {
+        advance(p)
+        if check(p, lex.Tok.If) {
+            els = if_stmt(p)!
+        } else {
+            els = block(p)!
+        }
+    }
+    return node(p, ast.Nk.If, kw, cond, then, els, -1)
+}
+
+fn header_expr(p: *mut Parser): !i32 {
+    let saved = (*p).no_struct
+    (*p).no_struct = true
+    let e = expr(p)!
+    (*p).no_struct = saved
+    return e
+}
+
+fn for_stmt(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let kw = advance(p)
+    if check(p, lex.Tok.Ident) && next_is(p, lex.Tok.In) {
+        let name = advance(p)
+        advance(p)
+        let start = expr(p)!
+        ok = expect(p, lex.Tok.DotDotLt, b"expected `..<`")!
+        let end = header_expr(p)!
+        let body = block(p)!
+        return node(p, ast.Nk.ForRange, kw, name, start, end, body)
+    }
+    let mut flags = 0
+    let mut init_name = -1
+    let mut init = -1
+    if !check(p, lex.Tok.Semi) {
+        init_name = expect(p, lex.Tok.Ident, b"expected loop variable name")!
+        if check(p, lex.Tok.ColonEq) {
+            advance(p)
+            flags = 1
+        } else if check(p, lex.Tok.Eq) {
+            advance(p)
+        } else {
+            return error(fail(p, (*p).i, b"expected `:=` or `=`"))
+        }
+        init = expr(p)!
+    }
+    ok = expect(p, lex.Tok.Semi, b"expected `;`")!
+    let mut cond = -1
+    if !check(p, lex.Tok.Semi) {
+        cond = expr(p)!
+    }
+    ok = expect(p, lex.Tok.Semi, b"expected `;`")!
+    let mut post_name = -1
+    let mut post = -1
+    let mut op = -1
+    if !check(p, lex.Tok.LBrace) {
+        post_name = expect(p, lex.Tok.Ident, b"expected name in post expression")!
+        if check(p, lex.Tok.PlusEq) || check(p, lex.Tok.MinusEq) {
+            op = advance(p)
+        } else {
+            op = expect(p, lex.Tok.Eq, b"expected `=`, `+=`, or `-=`")!
+        }
+        post = header_expr(p)!
+    }
+    let body = block(p)!
+    let base = sp(p)
+    ok = push(p, init_name)!
+    ok = push(p, init)!
+    ok = push(p, cond)!
+    ok = push(p, post_name)!
+    ok = push(p, post)!
+    ok = push(p, body)!
+    let l = list(p, base)!
+    return node(p, ast.Nk.ForC, kw, flags, op, -1, l)
+}
+
+// match statement (is_expr false: arms are blocks) or expression
+// (arms are `{ expr }`).
+fn match_any(p: *mut Parser, is_expr: bool): !i32 {
+    let mut ok = 0
+    let kw = advance(p)
+    let subject = header_expr(p)!
+    ok = expect(p, lex.Tok.LBrace, b"expected `{` after the `match` subject")!
+    let base = sp(p)
+    while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
+        let pat = pattern(p)!
+        let mut guard = -1
+        if check(p, lex.Tok.When) {
+            if nkind(p, pat) == ast.Nk.PatElse {
+                return error(fail(p, (*p).i, b"`else` cannot have a `when` guard"))
+            }
+            advance(p)
+            guard = header_expr(p)!
+        } else if nkind(p, pat) == ast.Nk.PatWild {
+            return error(fail(p, ntok(p, pat), b"wildcard `_` requires a `when` guard (use `else` for a catch-all)"))
+        }
+        let mut body = -1
+        if is_expr {
+            ok = expect(p, lex.Tok.LBrace, b"expected `{` before the arm value")!
+            body = expr(p)!
+            ok = expect(p, lex.Tok.RBrace, b"expected `}` after the arm value")!
+        } else {
+            body = block(p)!
+        }
+        ok = push(p, node(p, ast.Nk.Arm, ntok(p, pat), pat, guard, body, -1)!)!
+    }
+    ok = expect(p, lex.Tok.RBrace, b"expected `}` closing `match`")!
+    if sp(p) == base {
+        return error(fail(p, kw, b"`match` requires at least one arm"))
+    }
+    let l = list(p, base)!
+    if is_expr {
+        return node(p, ast.Nk.MatchE, kw, subject, -1, -1, l)
+    }
+    return node(p, ast.Nk.Match, kw, subject, -1, -1, l)
+}
+
+fn pattern(p: *mut Parser): !i32 {
+    let mut ok = 0
+    if check(p, lex.Tok.Else) {
+        return node(p, ast.Nk.PatElse, advance(p), -1, -1, -1, -1)
+    }
+    if check(p, lex.Tok.Ident) && is_text(p, (*p).i, b"_") {
+        return node(p, ast.Nk.PatWild, advance(p), -1, -1, -1, -1)
+    }
+    let k = cur(p)
+    if k == lex.Tok.Gt || k == lex.Tok.GtEq || k == lex.Tok.Lt || k == lex.Tok.LtEq || k == lex.Tok.BangEq {
+        let op = advance(p)
+        let rhs = header_expr(p)!
+        return node(p, ast.Nk.PatRel, op, rhs, -1, -1, -1)
+    }
+    let saved = (*p).no_struct
+    (*p).no_struct = true
+    let first = expr(p)!
+    let mut r = -1
+    if check(p, lex.Tok.DotDotEq) {
+        let op = advance(p)
+        let end = expr(p)!
+        r = node(p, ast.Nk.PatRange, op, first, end, -1, -1)!
+    } else {
+        let base = sp(p)
+        ok = push(p, first)!
+        while check(p, lex.Tok.Comma) {
+            advance(p)
+            ok = push(p, expr(p)!)!
+        }
+        let l = list(p, base)!
+        r = node(p, ast.Nk.PatLit, ntok(p, first), -1, -1, -1, l)!
+    }
+    (*p).no_struct = saved
+    return r
+}
+
+// ---- expressions ----
+
+// expr: logicalOr, then `or { … }` fallbacks.
+pub fn expr(p: *mut Parser): !i32 {
+    let mut r = binary(p, 0)!
+    while check(p, lex.Tok.Or) {
+        let op = advance(p)
+        let fb = or_block(p)!
+        r = node(p, ast.Nk.Or, op, r, fb, -1, -1)!
+    }
+    return r
+}
+
+fn or_block(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let open = expect(p, lex.Tok.LBrace, b"expected `{` after `or`")!
+    let base = sp(p)
+    while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
+        if can_start_expr(cur(p)) {
+            let e = expr(p)!
+            if check(p, lex.Tok.RBrace) {
+                advance(p)
+                let l = list(p, base)!
+                return node(p, ast.Nk.OrBlock, open, e, -1, -1, l)
+            }
+            ok = push(p, stmt_from_expr(p, e)!)!
+        } else {
+            ok = push(p, stmt(p)!)!
+        }
+    }
+    return error(fail(p, (*p).i, b"`or` block requires a final expression"))
+}
+
+// Binary operator levels, loosest first: 0 `||`, 1 `&&`, 2 `== !=`,
+// 3 `< <= > >=`, 4 `|`, 5 `^`, 6 `&`, 7 `<< >>`, 8 `+ -`, 9 `* / %`.
+fn in_level(k: lex.Tok, lvl: i32): bool {
+    let r = match lvl {
+        0 { k == lex.Tok.PipePipe }
+        1 { k == lex.Tok.AmpAmp }
+        2 { k == lex.Tok.EqEq || k == lex.Tok.BangEq }
+        3 { k == lex.Tok.Lt || k == lex.Tok.LtEq || k == lex.Tok.Gt || k == lex.Tok.GtEq }
+        4 { k == lex.Tok.Pipe }
+        5 { k == lex.Tok.Caret }
+        6 { k == lex.Tok.Amp }
+        7 { k == lex.Tok.LtLt || k == lex.Tok.GtGt }
+        8 { k == lex.Tok.Plus || k == lex.Tok.Minus }
+        else { k == lex.Tok.Star || k == lex.Tok.Slash || k == lex.Tok.Percent }
+    }
+    return r
+}
+
+fn binary(p: *mut Parser, lvl: i32): !i32 {
+    if lvl == 10 {
+        return unary(p)
+    }
+    let mut left = binary(p, lvl + 1)!
+    // `*` `/` `%` on a new line start a new statement (`*p = …`), as in Klin
+    while in_level(cur(p), lvl) && (lvl != 9 || line(p, (*p).i) == line(p, ntok(p, left))) {
+        let op = advance(p)
+        let right = binary(p, lvl + 1)!
+        left = node(p, ast.Nk.Binary, op, left, right, -1, -1)!
+    }
+    return left
+}
+
+fn unary(p: *mut Parser): !i32 {
+    let k = cur(p)
+    if k == lex.Tok.Minus || k == lex.Tok.Bang || k == lex.Tok.Tilde || k == lex.Tok.Star || k == lex.Tok.Amp {
+        let op = advance(p)
+        let e = unary(p)!
+        return node(p, ast.Nk.Unary, op, e, -1, -1, -1)
+    }
+    let mut e = primary(p)!
+    while check(p, lex.Tok.Bang) {
+        e = node(p, ast.Nk.Propagate, advance(p), e, -1, -1, -1)!
+    }
+    return e
+}
+
+fn call_paren_same_line(p: *mut Parser, callee: i32): bool {
+    return check(p, lex.Tok.LParen) && ((*p).paren > 0 || line(p, (*p).i) == line(p, callee))
+}
+
+// `( args )`; returns the list.
+fn arg_list(p: *mut Parser): !i32 {
+    let mut ok = 0
+    ok = expect(p, lex.Tok.LParen, b"expected `(`")!
+    (*p).paren += 1
+    let saved = (*p).no_struct
+    (*p).no_struct = false
+    let base = sp(p)
+    if !check(p, lex.Tok.RParen) {
+        ok = push(p, expr(p)!)!
+        while check(p, lex.Tok.Comma) {
+            advance(p)
+            ok = push(p, expr(p)!)!
+        }
+    }
+    ok = expect(p, lex.Tok.RParen, b"expected `)`")!
+    (*p).paren -= 1
+    (*p).no_struct = saved
+    return list(p, base)
+}
+
+// Expression with struct literals allowed (inside brackets, parens …).
+fn expr_struct_ok(p: *mut Parser): !i32 {
+    let saved = (*p).no_struct
+    (*p).no_struct = false
+    let e = expr(p)!
+    (*p).no_struct = saved
+    return e
+}
+
+// Does the Str token hold an unescaped `$` (Klin: interpolation)?
+fn has_interp(p: *mut Parser, tok: i32): bool {
+    let s = text(p, tok)
+    let mut j = 1
+    while j < s.len - 1 {
+        if s[j] == '\\' {
+            j += 1
+        } else if s[j] == '$' {
+            return true
+        }
+        j += 1
+    }
+    return false
+}
+
+fn primary(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let t = (*p).i
+    let k = cur(p)
+    if k == lex.Tok.Match {
+        return match_any(p, true)
+    }
+    if k == lex.Tok.Pick {
+        advance(p)
+        let cond = header_expr(p)!
+        ok = expect(p, lex.Tok.LBrace, b"expected `{` after the `pick` condition")!
+        let th = expr(p)!
+        ok = expect(p, lex.Tok.RBrace, b"expected `}` after the `pick` then-expression")!
+        ok = expect(p, lex.Tok.LBrace, b"expected `{` before the `pick` else-expression")!
+        let el = expr(p)!
+        ok = expect(p, lex.Tok.RBrace, b"expected `}` after the `pick` else-expression")!
+        return node(p, ast.Nk.Pick, t, cond, th, el, -1)
+    }
+    let mut e = -1
+    if k == lex.Tok.Int {
+        e = node(p, ast.Nk.Int, advance(p), -1, -1, -1, -1)!
+    } else if k == lex.Tok.Float {
+        e = node(p, ast.Nk.Float, advance(p), -1, -1, -1, -1)!
+    } else if k == lex.Tok.Str {
+        if has_interp(p, t) {
+            let er = fail(p, t, b"string interpolation is not supported by Kliner yet")
+            diag.set_note((*p).d, b"`$name` / `${expr}` in strings: docs/02-core-subset.md C10; write `\\$` for a literal `$`")
+            return error(er)
+        }
+        e = node(p, ast.Nk.Str, advance(p), -1, -1, -1, -1)!
+    } else if k == lex.Tok.Bytes {
+        e = node(p, ast.Nk.Bytes, advance(p), -1, -1, -1, -1)!
+    } else if k == lex.Tok.True || k == lex.Tok.False {
+        e = node(p, ast.Nk.Bool, advance(p), -1, -1, -1, -1)!
+    } else if k == lex.Tok.Error {
+        advance(p)
+        ok = expect(p, lex.Tok.LParen, b"expected `(` after `error`")!
+        (*p).paren += 1
+        let code = expr(p)!
+        ok = expect(p, lex.Tok.RParen, b"expected `)` after error code")!
+        (*p).paren -= 1
+        e = node(p, ast.Nk.ErrorE, t, code, -1, -1, -1)!
+    } else if k == lex.Tok.Ident {
+        advance(p)
+        if check(p, lex.Tok.Dot) && (*p).i + 2 < (*(*p).lx).toks.len && next_is(p, lex.Tok.Ident) && is_qual(p, text(p, t)) {
+            advance(p)
+            let member = advance(p)
+            if call_paren_same_line(p, member) {
+                let args = arg_list(p)!
+                e = node(p, ast.Nk.Call, t, t, member, -1, args)!
+            } else if check(p, lex.Tok.LBrace) && !(*p).no_struct {
+                e = struct_lit(p, member, t)!
+            } else {
+                let obj = node(p, ast.Nk.Name, t, -1, -1, -1, -1)!
+                e = node(p, ast.Nk.Get, member, obj, -1, -1, -1)!
+            }
+        } else if call_paren_same_line(p, t) {
+            ok = reject_c(p, t, b"a call name")!
+            let args = arg_list(p)!
+            e = node(p, ast.Nk.Call, t, -1, t, -1, args)!
+        } else if check(p, lex.Tok.LBrace) && !(*p).no_struct {
+            e = struct_lit(p, t, -1)!
+        } else {
+            e = node(p, ast.Nk.Name, t, -1, -1, -1, -1)!
+        }
+    } else if k == lex.Tok.LBracket {
+        advance(p)
+        let saved = (*p).no_struct
+        (*p).no_struct = false
+        let base = sp(p)
+        if !check(p, lex.Tok.RBracket) {
+            ok = push(p, expr(p)!)!
+            while check(p, lex.Tok.Comma) {
+                advance(p)
+                ok = push(p, expr(p)!)!
+            }
+        }
+        (*p).no_struct = saved
+        ok = expect(p, lex.Tok.RBracket, b"expected `]` after array literal")!
+        let l = list(p, base)!
+        e = node(p, ast.Nk.Array, t, -1, -1, -1, l)!
+    } else if k == lex.Tok.Cast {
+        advance(p)
+        ok = expect(p, lex.Tok.LParen, b"expected `(` after `cast`")!
+        (*p).paren += 1
+        let ty = type_name(p)!
+        ok = expect(p, lex.Tok.Comma, b"expected `,` after the cast type")!
+        let v = expr_struct_ok(p)!
+        ok = expect(p, lex.Tok.RParen, b"expected `)` after the cast")!
+        (*p).paren -= 1
+        e = node(p, ast.Nk.Cast, t, ty, v, -1, -1)!
+    } else if k == lex.Tok.LParen {
+        advance(p)
+        (*p).paren += 1
+        let inner = expr_struct_ok(p)!
+        ok = expect(p, lex.Tok.RParen, b"expected `)`")!
+        (*p).paren -= 1
+        e = node(p, ast.Nk.Group, t, inner, -1, -1, -1)!
+    } else {
+        return error(fail(p, t, b"expected expression"))
+    }
+    while check(p, lex.Tok.Dot) || check(p, lex.Tok.LBracket) {
+        if check(p, lex.Tok.LBracket) {
+            let br = advance(p)
+            if check(p, lex.Tok.Colon) {
+                advance(p)
+                let end = slice_bound(p)!
+                ok = expect(p, lex.Tok.RBracket, b"expected `]` after `:`")!
+                e = node(p, ast.Nk.Slice, br, e, -1, end, -1)!
+            } else {
+                let first = expr_struct_ok(p)!
+                if check(p, lex.Tok.Colon) {
+                    advance(p)
+                    let end = slice_bound(p)!
+                    ok = expect(p, lex.Tok.RBracket, b"expected `]` after `:`")!
+                    e = node(p, ast.Nk.Slice, br, e, first, end, -1)!
+                } else {
+                    ok = expect(p, lex.Tok.RBracket, b"expected `]` after the index")!
+                    e = node(p, ast.Nk.Index, br, e, first, -1, -1)!
+                }
+            }
+            continue
+        }
+        advance(p)
+        if check(p, lex.Tok.Await) {
+            e = node(p, ast.Nk.Await, advance(p), e, -1, -1, -1)!
+            continue
+        }
+        let member = expect(p, lex.Tok.Ident, b"expected field or method name")!
+        if call_paren_same_line(p, member) {
+            let args = arg_list(p)!
+            e = node(p, ast.Nk.MCall, member, e, -1, -1, args)!
+        } else {
+            e = node(p, ast.Nk.Get, member, e, -1, -1, -1)!
+        }
+    }
+    return e
+}
+
+fn slice_bound(p: *mut Parser): !i32 {
+    if check(p, lex.Tok.RBracket) {
+        return -1
+    }
+    return expr_struct_ok(p)
+}
+
+// `T { … }` / `mod.T { … }`: empty, named (`x: e, …`) or positional.
+fn struct_lit(p: *mut Parser, ty: i32, md: i32): !i32 {
+    let mut ok = 0
+    ok = expect(p, lex.Tok.LBrace, b"expected `{`")!
+    let base = sp(p)
+    if check(p, lex.Tok.RBrace) {
+        advance(p)
+        let l = list(p, base)!
+        return node(p, ast.Nk.StructLit, ty, md, 0, -1, l)
+    }
+    if check(p, lex.Tok.Ident) && next_is(p, lex.Tok.Colon) {
+        while true {
+            let name = expect(p, lex.Tok.Ident, b"expected field name")!
+            ok = expect(p, lex.Tok.Colon, b"expected `:` after field name")!
+            if seen(p, base, 2, name) {
+                return error(fail3(p, name, b"duplicate field `", name, b"`"))
+            }
+            ok = push(p, name)!
+            ok = push(p, expr(p)!)!
+            if !check(p, lex.Tok.Comma) {
+                break
+            }
+            advance(p)
+        }
+        ok = expect(p, lex.Tok.RBrace, b"expected `}`")!
+        let l = list(p, base)!
+        return node(p, ast.Nk.StructLit, ty, md, 1, -1, l)
+    }
+    ok = push(p, expr(p)!)!
+    while check(p, lex.Tok.Comma) {
+        advance(p)
+        ok = push(p, expr(p)!)!
+    }
+    ok = expect(p, lex.Tok.RBrace, b"expected `}`")!
+    let l = list(p, base)!
+    return node(p, ast.Nk.StructLit, ty, md, 0, -1, l)
+}
+
+// ---- types ----
+
+pub fn type_name(p: *mut Parser): !i32 {
+    let mut ok = 0
+    let t = (*p).i
+    if check(p, lex.Tok.Bang) {
+        advance(p)
+        let v = type_name(p)!
+        return node(p, ast.Nk.TErr, t, v, -1, -1, -1)
+    }
+    if check(p, lex.Tok.Fn) {
+        advance(p)
+        ok = expect(p, lex.Tok.LParen, b"expected `(` after `fn` in function type")!
+        let base = sp(p)
+        if !check(p, lex.Tok.RParen) {
+            ok = push(p, type_name(p)!)!
+            while check(p, lex.Tok.Comma) {
+                advance(p)
+                ok = push(p, type_name(p)!)!
+            }
+        }
+        ok = expect(p, lex.Tok.RParen, b"expected `)` after function type parameters")!
+        let mut ret = -1
+        if check(p, lex.Tok.Colon) {
+            advance(p)
+            ret = type_name(p)!
+        }
+        let l = list(p, base)!
+        return node(p, ast.Nk.TFn, t, ret, -1, -1, l)
+    }
+    if check(p, lex.Tok.Star) {
+        advance(p)
+        let mut flags = 0
+        if check(p, lex.Tok.Mut) {
+            advance(p)
+            flags += 1
+        }
+        if check(p, lex.Tok.Volatile) {
+            advance(p)
+            flags += 2
+        }
+        let el = type_name(p)!
+        return node(p, ast.Nk.TPtr, t, el, flags, -1, -1)
+    }
+    if check(p, lex.Tok.LBracket) {
+        advance(p)
+        if check(p, lex.Tok.RBracket) {
+            advance(p)
+            let el = type_name(p)!
+            return node(p, ast.Nk.TSlice, t, el, -1, -1, -1)
+        }
+        let start = (*p).i
+        if check(p, lex.Tok.RBracket) || check(p, lex.Tok.Eof) {
+            return error(fail(p, (*p).i, b"expected array length in `[...]`"))
+        }
+        let len = expr(p)!
+        let end = (*p).i
+        ok = expect(p, lex.Tok.RBracket, b"expected `]` after array length")!
+        let el = type_name(p)!
+        return node(p, ast.Nk.TArray, t, len, el, start, end)
+    }
+    ok = expect(p, lex.Tok.Ident, b"expected type name")!
+    if !check(p, lex.Tok.Dot) {
+        return node(p, ast.Nk.TName, t, -1, -1, -1, -1)
+    }
+    advance(p)
+    let second = expect(p, lex.Tok.Ident, b"expected type name after `.`")!
+    return node(p, ast.Nk.TName, t, second, -1, -1, -1)
+}

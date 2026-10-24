@@ -1,0 +1,44 @@
+// expressions: precedence, unary, postfix, literals, struct literals,
+// or-blocks, propagation, pick, casts, the same-line rules
+import geo
+fn exprs(a: i32, b: i32, s: []u8): !i32 {
+    let p = a + b * 2 - (a - b) / 3 % 4
+    let q = a << 2 | b >> 1 & 3 ^ a
+    let r = a < b && b <= 3 || a > 1 && a >= 2 || a == b || a != b
+    let u = -a + !ok + ~b + *ptr + &x
+    let n = (1 + 2) * 3
+    let lits = [1, 0x1f, 0b101, 0o17, 1_000, 2.5, 'a', '\n', true, false]
+    let t = "plain \$ text \\ \"q\""
+    let bs = b"bytes\0\t"
+    let el = s[1]
+    let sl = s[1:3]
+    let s2 = s[:2]
+    let s3 = s[2:]
+    let s4 = s[:]
+    let c = cast(i64, a) + cast(*mut u8, s)
+    let pt = Point{x: 1, y: 2}
+    let pp = Point{1, 2}
+    let gp = geo.Point{x: 0, y: 0}
+    let e = Point{}
+    let v = f(1)!
+    let w = g(a) or { 0 }
+    let z = h() or {
+        log(err)
+        0
+    }
+    let pk = pick a > b { a } { b }
+    let mc = p.q.r(1).s[2].t()
+    let fc = geo.dist(a, b)
+    let nest = f(g(h(1)), [2, 3], Point{x: 4})
+    if a == (Point{x: 1}).x {
+    }
+    if pt.x > 0 {
+    }
+    // `*` binds only on one line: the next line is a new statement
+    let m = a
+    *ptr = 3
+    // a call needs `(` on the same line
+    let k = f
+    (b).go()
+    return error(5)
+}

@@ -1,0 +1,11 @@
+unit module="sys"
+  fn @3:5 name="call6" npos=@3:8 pub=1 async=0 assoc=- ret="i64"
+    param @3:14 name="nr" type="i64"
+    param @3:23 name="a" type="i64"
+    param @3:31 name="b" type="i64"
+    param @3:39 name="c" type="i64"
+    param @3:47 name="d" type="i64"
+    param @3:55 name="e" type="i64"
+    param @3:63 name="f" type="i64"
+  fn @4:1 name="exit" npos=@4:4 pub=0 async=0 assoc=- ret=-
+    param @4:9 name="code" type="i32"

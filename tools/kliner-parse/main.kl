@@ -1,0 +1,780 @@
+// kliner-parse FILE: parse FILE and dump the AST, one node per line,
+// children indented by two spaces (format: docs/03-ast-dump.md):
+//   TAG @LINE:COL key=value ...
+// Same format as tools/klin-parse.dart (Klin's own parser) —
+// scripts/test.sh diffs them. A lexical or syntax error prints
+// `LINE:COL: message` to stdout and exits 1 (a `note:` for features
+// Kliner does not support yet goes to stderr); usage / I/O errors go to
+// stderr and exit 2.
+module main
+import arena
+import ast
+import diag
+import lex
+import os
+import out
+import parse
+
+// All state of the tool; no globals (C7.3).
+struct Ctx {
+    a: arena.Arena
+    o: out.Out
+    e: out.Out
+    d: diag.Diag
+    lx: lex.Lexer
+    t: ast.Ast
+    ps: parse.Parser
+}
+
+fn put_esc(o: *mut out.Out, t: []u8) {
+    let digits = b"0123456789abcdef"
+    for i in 0..<t.len {
+        let c = t[i]
+        if c == '\\' {
+            (*o).lit(b"\\\\")
+        } else if c >= 0x20 && c < 0x7f && c != '"' {
+            (*o).lit(t[i:i + 1])
+        } else {
+            let mut h: [4]u8 = [92, 120, 0, 0]
+            h[2] = digits[cast(i32, c >> 4)]
+            h[3] = digits[cast(i32, c & 15)]
+            (*o).lit(h[:])
+        }
+    }
+}
+
+fn q(o: *mut out.Out, t: []u8) {
+    (*o).lit(b"\"")
+    put_esc(o, t)
+    (*o).lit(b"\"")
+}
+
+fn n(c: *mut Ctx, i: i32): ast.Node {
+    return (*c).t.nodes[i]
+}
+
+fn text(c: *mut Ctx, tok: i32): []u8 {
+    return lex.text(&(*c).lx, tok)
+}
+
+// Text of a token as Klin's lexeme: string values decoded, `\$` -> `$`.
+fn lexeme(c: *mut Ctx, tok: i32): ![]u8 {
+    let k = (*c).lx.toks[tok].kind
+    if k != lex.Tok.Str && k != lex.Tok.Bytes {
+        return text(c, tok)
+    }
+    let v = lex.str_value(&(*c).lx, &(*c).a, tok)!
+    let mut r = arena.alloc_u8(&(*c).a, v.len)!
+    let mut m = 0
+    for i in 0..<v.len {
+        if !(v[i] == '\\' && i + 1 < v.len && v[i + 1] == '$' && k == lex.Tok.Str) {
+            r[m] = v[i]
+            m += 1
+        }
+    }
+    return r[:m]
+}
+
+fn qtok(c: *mut Ctx, tok: i32): !i32 {
+    q(&(*c).o, lexeme(c, tok)!)
+    return 0
+}
+
+// quoted token text or `-` for -1
+fn opt(c: *mut Ctx, tok: i32): !i32 {
+    if tok < 0 {
+        (*c).o.lit(b"-")
+        return 0
+    }
+    return qtok(c, tok)
+}
+
+fn flag(c: *mut Ctx, v: bool) {
+    if v {
+        (*c).o.lit(b"1")
+    } else {
+        (*c).o.lit(b"0")
+    }
+}
+
+fn at(c: *mut Ctx, tok: i32) {
+    let [ln, col] = diag.pos(&(*c).d, (*c).lx.toks[tok].start)
+    (*c).o.lit(b"@")
+    (*c).o.dec(cast(i64, ln))
+    (*c).o.lit(b":")
+    (*c).o.dec(cast(i64, col))
+}
+
+// Starts a line: indent, tag, ` @L:C` (tok >= 0).
+fn head(c: *mut Ctx, depth: i32, tag: []u8, tok: i32) {
+    for i in 0..<depth {
+        (*c).o.lit(b"  ")
+    }
+    (*c).o.lit(tag)
+    if tok >= 0 {
+        (*c).o.lit(b" ")
+        at(c, tok)
+    }
+}
+
+fn key(c: *mut Ctx, k: []u8) {
+    (*c).o.lit(b" ")
+    (*c).o.lit(k)
+    (*c).o.lit(b"=")
+}
+
+fn count(c: *mut Ctx, l: i32): i32 {
+    return ast.count(&(*c).t, l)
+}
+
+fn item(c: *mut Ctx, l: i32, i: i32): i32 {
+    return ast.item(&(*c).t, l, i)
+}
+
+// Klin's type string, escaped (no quotes).
+fn ty(c: *mut Ctx, i: i32): !i32 {
+    let mut ok = 0
+    let x = n(c, i)
+    let o = &(*c).o
+    match x.kind {
+        ast.Nk.TName {
+            put_esc(o, text(c, x.tok))
+            if x.a >= 0 {
+                (*o).lit(b".")
+                put_esc(o, text(c, x.a))
+            }
+        }
+        ast.Nk.TPtr {
+            (*o).lit(b"*")
+            if (x.b & 1) != 0 {
+                (*o).lit(b"mut ")
+            }
+            if (x.b & 2) != 0 {
+                (*o).lit(b"volatile ")
+            }
+            ok = ty(c, x.a)!
+        }
+        ast.Nk.TSlice {
+            (*o).lit(b"[]")
+            ok = ty(c, x.a)!
+        }
+        ast.Nk.TArray {
+            (*o).lit(b"[")
+            let mut prev = (*c).lx.src[0:0]
+            for j in x.c..<x.extra {
+                let lx = lexeme(c, j)!
+                if j > x.c && !lex.eq(lx, b".") && !lex.eq(prev, b".") {
+                    (*o).lit(b" ")
+                }
+                put_esc(o, lx)
+                prev = lx
+            }
+            (*o).lit(b"]")
+            ok = ty(c, x.b)!
+        }
+        ast.Nk.TErr {
+            (*o).lit(b"!")
+            ok = ty(c, x.a)!
+        }
+        else {
+            (*o).lit(b"fn(")
+            for j in 0..<count(c, x.extra) {
+                if j > 0 {
+                    (*o).lit(b",")
+                }
+                ok = ty(c, item(c, x.extra, j))!
+            }
+            (*o).lit(b"):")
+            if x.a >= 0 {
+                ok = ty(c, x.a)!
+            } else {
+                (*o).lit(b"void")
+            }
+        }
+    }
+    return 0
+}
+
+fn qty(c: *mut Ctx, i: i32): !i32 {
+    let mut ok = 0
+    (*c).o.lit(b"\"")
+    ok = ty(c, i)!
+    (*c).o.lit(b"\"")
+    return 0
+}
+
+fn optty(c: *mut Ctx, i: i32): !i32 {
+    if i < 0 {
+        (*c).o.lit(b"-")
+        return 0
+    }
+    return qty(c, i)
+}
+
+// Children of list l, from item `from`, step 1.
+fn each(c: *mut Ctx, l: i32, from: i32, depth: i32): !i32 {
+    let mut ok = 0
+    for j in from..<count(c, l) {
+        ok = dump(c, item(c, l, j), depth)!
+    }
+    return 0
+}
+
+fn opt_node(c: *mut Ctx, i: i32, depth: i32): !i32 {
+    let mut ok = 0
+    if i >= 0 {
+        ok = dump(c, i, depth)!
+    }
+    return 0
+}
+
+// `name=` list of token texts: items from, from + step, … joined by sep
+fn names(c: *mut Ctx, l: i32, from: i32, step: i32) {
+    let o = &(*c).o
+    (*o).lit(b"\"")
+    let mut j = from
+    while j < count(c, l) {
+        if j > from {
+            (*o).lit(b",")
+        }
+        put_esc(o, text(c, item(c, l, j)))
+        j += step
+    }
+    (*o).lit(b"\"")
+}
+
+// Dump tag of a node kind that shares a dump shape with others.
+fn tag_of(k: ast.Nk): []u8 {
+    let tags = [
+        b"struct", b"enum", b"const", b"global", b"fn",
+        b"int", b"float", b"str", b"bytes", b"name",
+        b"group", b"error", b"propagate", b"await"]
+    let kinds = [
+        ast.Nk.Struct, ast.Nk.Enum, ast.Nk.Const, ast.Nk.Global, ast.Nk.Fn,
+        ast.Nk.Int, ast.Nk.Float, ast.Nk.Str, ast.Nk.Bytes, ast.Nk.Name,
+        ast.Nk.Group, ast.Nk.ErrorE, ast.Nk.Propagate, ast.Nk.Await]
+    for i in 0..<kinds.len {
+        if kinds[i] == k {
+            return tags[i]
+        }
+    }
+    return b"?"
+}
+
+fn decl(c: *mut Ctx, w: ast.Node, depth: i32): !i32 {
+    let mut ok = 0
+    let x = n(c, w.a)
+    let o = &(*c).o
+    let pub_ = (w.b & 1) != 0
+    let tag = tag_of(x.kind)
+    head(c, depth, tag, x.tok)
+    key(c, b"name")
+    ok = qtok(c, x.a)!
+    key(c, b"npos")
+    at(c, x.a)
+    key(c, b"pub")
+    flag(c, pub_)
+    if x.kind == ast.Nk.Enum {
+        key(c, b"base")
+        ok = optty(c, x.b)!
+    } else if x.kind == ast.Nk.Const {
+        key(c, b"type")
+        ok = qty(c, x.b)!
+    } else if x.kind == ast.Nk.Global {
+        key(c, b"mut")
+        flag(c, x.extra == 1)
+        key(c, b"type")
+        ok = qty(c, x.b)!
+    } else if x.kind == ast.Nk.Fn {
+        let sig = n(c, x.c)
+        key(c, b"async")
+        flag(c, (w.b & 2) != 0)
+        key(c, b"assoc")
+        ok = opt(c, x.b)!
+        key(c, b"ret")
+        ok = optty(c, sig.b)!
+    }
+    (*o).nl()
+    let d1 = depth + 1
+    for j in 0..<count(c, w.extra) {
+        let at_ = n(c, item(c, w.extra, j))
+        head(c, d1, b"attr", at_.tok)
+        key(c, b"name")
+        ok = qtok(c, at_.tok)!
+        key(c, b"arg")
+        ok = opt(c, at_.a)!
+        (*o).nl()
+    }
+    if x.kind == ast.Nk.Struct || x.kind == ast.Nk.Enum {
+        ok = each(c, x.extra, 0, d1)!
+    } else if x.kind == ast.Nk.Const || x.kind == ast.Nk.Global {
+        ok = opt_node(c, x.c, d1)!
+    } else if x.kind == ast.Nk.Fn {
+        let sig = n(c, x.c)
+        ok = opt_node(c, sig.a, d1)!
+        ok = each(c, sig.extra, 0, d1)!
+        ok = opt_node(c, x.extra, d1)!
+    }
+    return 0
+}
+
+fn arms(c: *mut Ctx, l: i32, depth: i32): !i32 {
+    let mut ok = 0
+    for j in 0..<count(c, l) {
+        let arm = n(c, item(c, l, j))
+        head(c, depth, b"arm", -1)
+        key(c, b"guard")
+        flag(c, arm.b >= 0)
+        (*c).o.nl()
+        ok = dump(c, arm.a, depth + 1)!
+        ok = opt_node(c, arm.b, depth + 1)!
+        ok = dump(c, arm.c, depth + 1)!
+    }
+    return 0
+}
+
+fn dump(c: *mut Ctx, i: i32, depth: i32): !i32 {
+    let mut ok = 0
+    let x = n(c, i)
+    let o = &(*c).o
+    let d1 = depth + 1
+    match x.kind {
+        ast.Nk.Unit {
+            head(c, depth, b"unit", -1)
+            key(c, b"module")
+            ok = opt(c, x.a)!
+            (*o).nl()
+            ok = each(c, x.extra, 0, d1)!
+        }
+        ast.Nk.Import {
+            head(c, depth, b"import", x.tok)
+            key(c, b"spec")
+            ok = qtok(c, x.a)!
+            key(c, b"path")
+            flag(c, (*c).lx.toks[x.a].kind == lex.Tok.Str)
+            key(c, b"alias")
+            ok = opt(c, x.b)!
+            (*o).nl()
+        }
+        ast.Nk.Decl {
+            ok = decl(c, x, depth)!
+        }
+        ast.Nk.Field, ast.Nk.Param {
+            if x.kind == ast.Nk.Field {
+                head(c, depth, b"field", x.tok)
+            } else {
+                head(c, depth, b"param", x.tok)
+            }
+            key(c, b"name")
+            ok = qtok(c, x.tok)!
+            key(c, b"type")
+            ok = qty(c, x.a)!
+            (*o).nl()
+        }
+        ast.Nk.Variant {
+            head(c, depth, b"variant", x.tok)
+            key(c, b"name")
+            ok = qtok(c, x.tok)!
+            (*o).nl()
+            ok = opt_node(c, x.a, d1)!
+        }
+        ast.Nk.Recv {
+            head(c, depth, b"recv", x.tok)
+            key(c, b"name")
+            ok = qtok(c, x.tok)!
+            key(c, b"mut")
+            flag(c, x.b == 1)
+            key(c, b"type")
+            ok = qty(c, x.a)!
+            (*o).nl()
+        }
+        ast.Nk.Block {
+            head(c, depth, b"block", x.tok)
+            (*o).nl()
+            ok = each(c, x.extra, 0, d1)!
+        }
+        ast.Nk.Asm {
+            head(c, depth, b"asm", x.tok)
+            key(c, b"code")
+            ok = qtok(c, x.a)!
+            (*o).nl()
+        }
+        ast.Nk.Let {
+            head(c, depth, b"let", x.tok)
+            key(c, b"name")
+            ok = qtok(c, x.tok)!
+            key(c, b"mut")
+            flag(c, (x.c & 1) != 0)
+            key(c, b"short")
+            flag(c, (x.c & 2) != 0)
+            key(c, b"type")
+            ok = optty(c, x.a)!
+            (*o).nl()
+            ok = opt_node(c, x.b, d1)!
+        }
+        ast.Nk.LetStruct {
+            head(c, depth, b"let-struct", x.tok)
+            key(c, b"mut")
+            flag(c, x.b == 1)
+            key(c, b"binds")
+            (*o).lit(b"\"")
+            let mut j = 0
+            while j < count(c, x.extra) {
+                if j > 0 {
+                    (*o).lit(b",")
+                }
+                put_esc(o, text(c, item(c, x.extra, j)))
+                (*o).lit(b":")
+                put_esc(o, text(c, item(c, x.extra, j + 1)))
+                j += 2
+            }
+            (*o).lit(b"\"")
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+        }
+        ast.Nk.LetArray {
+            head(c, depth, b"let-array", x.tok)
+            key(c, b"mut")
+            flag(c, x.b == 1)
+            key(c, b"names")
+            names(c, x.extra, 0, 1)
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+        }
+        ast.Nk.Assign {
+            head(c, depth, b"assign", x.tok)
+            key(c, b"op")
+            if x.c < 0 {
+                (*o).lit(b"-")
+            } else {
+                let t = text(c, x.c)
+                q(o, t[:t.len - 1])
+            }
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            ok = dump(c, x.b, d1)!
+        }
+        ast.Nk.MultiAssign {
+            head(c, depth, b"multi-assign", x.tok)
+            key(c, b"n")
+            (*o).dec(cast(i64, x.a))
+            (*o).nl()
+            ok = each(c, x.extra, 0, d1)!
+        }
+        ast.Nk.StructAssign {
+            head(c, depth, b"struct-assign", x.tok)
+            key(c, b"fields")
+            names(c, x.extra, 0, 2)
+            (*o).nl()
+            let mut j = 1
+            while j < count(c, x.extra) {
+                ok = dump(c, item(c, x.extra, j), d1)!
+                j += 2
+            }
+            ok = dump(c, x.a, d1)!
+        }
+        ast.Nk.ExprStmt {
+            ok = dump(c, x.a, depth)!
+        }
+        ast.Nk.If {
+            head(c, depth, b"if", x.tok)
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            ok = dump(c, x.b, d1)!
+            ok = opt_node(c, x.c, d1)!
+        }
+        ast.Nk.While {
+            head(c, depth, b"while", x.tok)
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            ok = dump(c, x.b, d1)!
+        }
+        ast.Nk.ForRange {
+            head(c, depth, b"for-range", x.tok)
+            key(c, b"name")
+            ok = qtok(c, x.a)!
+            (*o).nl()
+            ok = dump(c, x.b, d1)!
+            ok = dump(c, x.c, d1)!
+            ok = dump(c, x.extra, d1)!
+        }
+        ast.Nk.ForC {
+            let l = x.extra
+            head(c, depth, b"for-c", x.tok)
+            key(c, b"init")
+            ok = opt(c, item(c, l, 0))!
+            key(c, b"decl")
+            flag(c, x.a == 1)
+            key(c, b"cond")
+            flag(c, item(c, l, 2) >= 0)
+            key(c, b"post")
+            ok = opt(c, item(c, l, 3))!
+            key(c, b"op")
+            if x.b >= 0 && (*c).lx.toks[x.b].kind != lex.Tok.Eq {
+                let t = text(c, x.b)
+                q(o, t[:1])
+            } else {
+                (*o).lit(b"-")
+            }
+            (*o).nl()
+            ok = opt_node(c, item(c, l, 1), d1)!
+            ok = opt_node(c, item(c, l, 2), d1)!
+            ok = opt_node(c, item(c, l, 4), d1)!
+            ok = dump(c, item(c, l, 5), d1)!
+        }
+        ast.Nk.Return {
+            head(c, depth, b"return", x.tok)
+            (*o).nl()
+            ok = opt_node(c, x.a, d1)!
+        }
+        ast.Nk.Break {
+            head(c, depth, b"break", x.tok)
+            (*o).nl()
+        }
+        ast.Nk.Continue {
+            head(c, depth, b"continue", x.tok)
+            (*o).nl()
+        }
+        ast.Nk.Defer {
+            head(c, depth, b"defer", x.tok)
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+        }
+        ast.Nk.Match, ast.Nk.MatchE {
+            if x.kind == ast.Nk.Match {
+                head(c, depth, b"match", x.tok)
+            } else {
+                head(c, depth, b"match-expr", x.tok)
+            }
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            ok = arms(c, x.extra, d1)!
+        }
+        ast.Nk.PatLit {
+            head(c, depth, b"pat-lit", x.tok)
+            (*o).nl()
+            ok = each(c, x.extra, 0, d1)!
+        }
+        ast.Nk.PatRange {
+            head(c, depth, b"pat-range", x.tok)
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            ok = dump(c, x.b, d1)!
+        }
+        ast.Nk.PatRel {
+            head(c, depth, b"pat-rel", x.tok)
+            key(c, b"op")
+            ok = qtok(c, x.tok)!
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+        }
+        ast.Nk.PatWild {
+            head(c, depth, b"pat-wild", x.tok)
+            (*o).nl()
+        }
+        ast.Nk.PatElse {
+            head(c, depth, b"pat-else", x.tok)
+            (*o).nl()
+        }
+        else {
+            ok = expr(c, x, depth)!
+        }
+    }
+    return 0
+}
+
+fn expr(c: *mut Ctx, x: ast.Node, depth: i32): !i32 {
+    let mut ok = 0
+    let o = &(*c).o
+    let d1 = depth + 1
+    match x.kind {
+        ast.Nk.Int, ast.Nk.Float, ast.Nk.Str, ast.Nk.Bytes, ast.Nk.Name {
+            let tag = tag_of(x.kind)
+            head(c, depth, tag, x.tok)
+            key(c, b"v")
+            ok = qtok(c, x.tok)!
+            (*o).nl()
+        }
+        ast.Nk.Bool {
+            head(c, depth, b"bool", x.tok)
+            key(c, b"v")
+            (*o).lit(text(c, x.tok))
+            (*o).nl()
+        }
+        ast.Nk.Get {
+            head(c, depth, b"get", x.tok)
+            key(c, b"name")
+            ok = qtok(c, x.tok)!
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+        }
+        ast.Nk.MCall {
+            head(c, depth, b"mcall", x.tok)
+            key(c, b"name")
+            ok = qtok(c, x.tok)!
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            ok = each(c, x.extra, 0, d1)!
+        }
+        ast.Nk.StructLit {
+            head(c, depth, b"struct-lit", x.tok)
+            key(c, b"mod")
+            ok = opt(c, x.a)!
+            key(c, b"type")
+            ok = qtok(c, x.tok)!
+            key(c, b"named")
+            flag(c, x.b == 1)
+            key(c, b"fields")
+            if x.b == 1 {
+                names(c, x.extra, 0, 2)
+                (*o).nl()
+                let mut j = 1
+                while j < count(c, x.extra) {
+                    ok = dump(c, item(c, x.extra, j), d1)!
+                    j += 2
+                }
+            } else {
+                (*o).lit(b"\"\"")
+                (*o).nl()
+                ok = each(c, x.extra, 0, d1)!
+            }
+        }
+        ast.Nk.Call {
+            head(c, depth, b"call", x.tok)
+            key(c, b"mod")
+            ok = opt(c, x.a)!
+            key(c, b"name")
+            ok = qtok(c, x.b)!
+            (*o).nl()
+            ok = each(c, x.extra, 0, d1)!
+        }
+        ast.Nk.Unary, ast.Nk.Binary {
+            if x.kind == ast.Nk.Unary {
+                head(c, depth, b"unary", x.tok)
+            } else {
+                head(c, depth, b"binary", x.tok)
+            }
+            key(c, b"op")
+            ok = qtok(c, x.tok)!
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            ok = opt_node(c, x.b, d1)!
+        }
+        ast.Nk.Index {
+            head(c, depth, b"index", x.tok)
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            ok = dump(c, x.b, d1)!
+        }
+        ast.Nk.Slice {
+            head(c, depth, b"slice", x.tok)
+            key(c, b"start")
+            flag(c, x.b >= 0)
+            key(c, b"end")
+            flag(c, x.c >= 0)
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            ok = opt_node(c, x.b, d1)!
+            ok = opt_node(c, x.c, d1)!
+        }
+        ast.Nk.Array {
+            head(c, depth, b"array", x.tok)
+            (*o).nl()
+            ok = each(c, x.extra, 0, d1)!
+        }
+        ast.Nk.Cast {
+            head(c, depth, b"cast", x.tok)
+            key(c, b"type")
+            ok = qty(c, x.a)!
+            (*o).nl()
+            ok = dump(c, x.b, d1)!
+        }
+        ast.Nk.Group, ast.Nk.ErrorE, ast.Nk.Propagate, ast.Nk.Await {
+            let tag = tag_of(x.kind)
+            head(c, depth, tag, x.tok)
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+        }
+        ast.Nk.Or {
+            head(c, depth, b"or", x.tok)
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            let fb = n(c, x.b)
+            head(c, d1, b"or-block", fb.tok)
+            key(c, b"n")
+            (*o).dec(cast(i64, count(c, fb.extra)))
+            (*o).nl()
+            ok = each(c, fb.extra, 0, d1 + 1)!
+            ok = dump(c, fb.a, d1 + 1)!
+        }
+        ast.Nk.Pick {
+            head(c, depth, b"pick", x.tok)
+            (*o).nl()
+            ok = dump(c, x.a, d1)!
+            ok = dump(c, x.b, d1)!
+            ok = dump(c, x.c, d1)!
+        }
+        else {
+            head(c, depth, b"?", x.tok)
+            (*o).nl()
+        }
+    }
+    return 0
+}
+
+fn run(c: *mut Ctx): !i32 {
+    let mut ok = 0
+    (*c).a = arena.Arena.new(1 << 30)!
+    defer arena.free_all(&(*c).a)
+    let args = os.args(&(*c).a)!
+    if args.list.len != 2 {
+        (*c).e.lit(b"usage: kliner-parse FILE")
+        (*c).e.nl()
+        return 2
+    }
+    let src = os.read_file(&(*c).a, args.arg_z(1))!
+    (*c).d = diag.Diag.new(args.list[1], src)
+    (*c).lx = lex.Lexer.new(src, &(*c).d)
+    let mut nt = lex.run(&(*c).lx, &(*c).a) or {
+        if err != diag.E_DIAG {
+            return error(err)
+        }
+        -1
+    }
+    if nt >= 0 {
+        (*c).t = ast.Ast.new(&(*c).a, nt)!
+        (*c).ps = parse.Parser.new(&(*c).lx, &(*c).d, &(*c).t, &(*c).a)
+        nt = parse.run(&(*c).ps) or {
+            if err != diag.E_DIAG {
+                return error(err)
+            }
+            -1
+        }
+    }
+    if nt < 0 {
+        diag.write_short(&(*c).d, &(*c).o)
+        if (*c).d.note.len > 0 {
+            (*c).e.lit(b"note: ")
+            (*c).e.lit((*c).d.note)
+            (*c).e.nl()
+        }
+        return 1
+    }
+    ok = dump(c, (*c).t.root, 0)!
+    return 0
+}
+
+fn main() {
+    let mut c: Ctx
+    c.o = out.Out.stdout()
+    c.e = out.Out.stderr()
+    let code = run(&c) or {
+        c.e.lit(b"error: ")
+        c.e.errno_name(err)
+        c.e.nl()
+        2
+    }
+    c.o.flush_quiet()
+    c.e.flush_quiet()
+    os.exit(code)
+}
