@@ -109,7 +109,9 @@ Found in stage 4 on `a66ffbd` (`klin FILE`); state on main `f9f5471`
   carried the entry file's path, and a lexer/parser error doubled the
   path (`r7.kl:/tmp/sp/r7.kl:2:9: …`). Now `r7.kl:2:9: …` and
   `/path/m/m.kl:2:12: …`. (kliner-check prints `L:C:` only.)
-- **K-B4** (still open in `f9f5471`) a zero-initialised `str` is a
+- **K-B4** (fixed in `e6058dc`, #361, D27: the zero of `str` is `""`;
+  the repro below now returns 0, a zeroed struct field / global `str`
+  has `.len` 0 too) a zero-initialised `str` was a
   NULL `const char *`; `s.len` (`strlen`), `s[i]` and `cstr_u8(s)` then
   crash (SIGSEGV, exit 139). The checker accepts it:
   ```kl
@@ -122,11 +124,18 @@ Found in stage 4 on `a66ffbd` (`klin FILE`); state on main `f9f5471`
   `t.name.len`) and a global `let mut g: str`. Expected: either `""` as
   the zero value of `str`, or a checker error for a `str` without an
   initializer. Kliner matches Klin's checker (ok).
-- **K-B5** (stage 5, still open in `f9f5471`; earlier also called
-  K-B4) narrow-integer arithmetic is not wrapped to its type (`u8`
-  `129 << 1` is 258): repro in
-  [05-ir.md](05-ir.md#differences-from-klin-klin--c--gcc). Marek
-  reports it to the Klin bot.
+- **K-B5** (stage 5, fixed in `e6058dc`, #361, D26; earlier also
+  called K-B4) narrow-integer arithmetic was not wrapped to its type
+  (`u8` `129 << 1` was 258): repro in
+  [05-ir.md](05-ir.md#differences-from-klin-klin--c--gcc).
+- **K-B6** (stage 6, fixed in `e6058dc`, #361, D26) a shift of
+  `i32` / `u32` / `i64` / `u64` by a count ≥ the width followed the
+  hardware (count masked): repro in
+  [06-x86-64.md](06-x86-64.md#klin-bug-k-b6-fixed-in-e6058dc).
+  D26 does not change the checker: a constant expression that
+  overflows (`const X: u8 = 1 << 8`) was already an error (D11, D12),
+  and D27 adds no error (a `str` without an initializer stays valid),
+  so the checker comparison needs no change.
 - Former proposals, now errors in Klin `f9f5471` and ported:
   **D23** a constant out-of-range index on a fixed array
   (``index 5 is out of range for `[3]i32` ``; `err_60`, `err_70`–`err_73`);

@@ -24,6 +24,9 @@
 #      own tools built by kliner-build give the same output as their
 #      Klin-built binaries, and kliner-build rebuilds itself to a fixpoint.
 #
+#   Needs Klin main e6058dc (#361) or later: tests/ir/c13 and
+#   tests/ir/wrap_assign rely on D26 (wrapping, defined shifts).
+#
 #   scripts/test.sh                 # klin from PATH, no Klin comparison
 #   KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
 #   DART=/path/to/dart              # default: dart from PATH

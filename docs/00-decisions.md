@@ -1,7 +1,8 @@
 # Kliner — design decisions
 
 This is the decision log (K1–K11) for Kliner, decided on 2026-10-23.
-No compiler code exists yet. For the stage plan see
+All decisions (K and C, every stage) in one register, in English:
+[decisions.md](decisions.md). For the stage plan see
 [01-roadmap.md](01-roadmap.md). For the language itself see
 [Klin](https://github.com/klin-lang/klin) and its
 [00-idea.md](https://github.com/klin-lang/klin/blob/main/docs/00-idea.md) /

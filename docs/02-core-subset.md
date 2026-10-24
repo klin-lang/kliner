@@ -30,7 +30,10 @@ The stage 3 review (C10, the AST model, the roadmap numbering) is
 **DECIDED (2026-10-24)** — see [C11](#c11-stage-3-review--decided-2026-10-24).
 The stage 5 IR choices are in [C13](#c13-stage-5-ir--partly-decided-2026-10-24): items 1–4
 (labels, wrapping, C layout, calling convention / frame slots) are
-**DECIDED (2026-10-24)**, items 5–8 stay **PROPOSED**.
+**DECIDED (2026-10-24)**, items 5–8 stay **PROPOSED**. The stage 6
+backend choices, [C14](#c14-stage-6-x86-64-backend--decided-2026-10-24),
+are **DECIDED (2026-10-24)**. All decisions in one place, in English:
+[decisions.md](decisions.md).
 
 The Klin changes the compiler source relies on are **merged into Klin
 main**: [#351](https://github.com/klin-lang/klin/pull/351) to
@@ -39,7 +42,10 @@ main**: [#351](https://github.com/klin-lang/klin/pull/351) to
 [#358](https://github.com/klin-lang/klin/pull/358) (`d7625f1`, G13, D19)
 are merged too; the runtime in `rt/` uses #358. Since stage 5 the code needs Klin main
 [#360](https://github.com/klin-lang/klin/pull/360) (`f9f5471`): `f()!`
-as a statement (C11.4).
+as a statement (C11.4). The tests need
+[#361](https://github.com/klin-lang/klin/pull/361) (`e6058dc`, D26 /
+D27): `tests/ir/c13` and `tests/ir/wrap_assign` compare with the Klin
+build and depend on the K-B5 / K-B6 fixes.
 
 ---
 
@@ -804,9 +810,10 @@ Stage 5 ([05-ir.md](05-ir.md)) needed these choices. Marek approved
    K9 holds (three-address, virtual registers, explicit widths, no
    SSA); the backend (stage 6) can split on labels.
 2. *(DECIDED 2026-10-24)* **Every operation wraps at its type** (`u8 + u8` is a `u8`). Klin's C
-   output does not (K-B5, still in `f9f5471`; reported to the Klin bot
-   by Marek); Kliner follows the declared types. Shift
-   counts ≥ the width give 0 / −1 (C: undefined).
+   output did not (K-B5, fixed in Klin main `e6058dc`, #361, D26);
+   Kliner follows the declared types. Shift counts ≥ the width give
+   0 / −1 (in Klin's C undefined until K-B6 was fixed in `e6058dc`, D26:
+   now the same).
 3. *(DECIDED 2026-10-24)* **Memory layout = C's natural layout** (as Klin's C), slices
    `{ptr, len i32}` (16 bytes), `!T` = `{is_err u8 @0, err i32 @4,
    value @8}`.
@@ -827,28 +834,30 @@ Stage 5 ([05-ir.md](05-ir.md)) needed these choices. Marek approved
    sees `prog.kl a b` where the native binary sees `./prog a b`), and
    the interpreter caps the call depth at 10 000 (traps beyond).
 
-## C14. Stage 6: x86-64 backend — PROPOSED
+## C14. Stage 6: x86-64 backend — DECIDED (2026-10-24)
 
-Stage 6 ([06-x86-64.md](06-x86-64.md)) needed these choices; all are
-**PROPOSED**:
+Stage 6 ([06-x86-64.md](06-x86-64.md), PR #7) needed these choices.
+Marek accepted all seven after merging #7 (`5d31ba4`) on 2026-10-24
+(**DECIDED**):
 
-1. *(PROPOSED)* **Own calling convention**, not SysV: all arguments on
+1. *(DECIDED 2026-10-24)* **Own calling convention**, not SysV: all arguments on
    the stack (`[rsp + 8j]` at the call), result in `rax`; no callee-saved
    registers besides `rbp`. SysV comes with C interop (stage 10).
-2. *(PROPOSED)* **`_start` maps a 1 GiB `MAP_NORESERVE` stack** with a
+2. *(DECIDED 2026-10-24)* **`_start` maps a 1 GiB `MAP_NORESERVE` stack** with a
    1 MiB guard and a `SIGSEGV` handler on an alternate stack, so a stack
    overflow is a trap (`kliner: trap: stack overflow`, exit 134) instead
    of a bare `SIGSEGV`; fallback to the kernel's stack if the `mmap`
    fails.
-3. *(PROPOSED)* **Traps**: `kliner: trap: MESSAGE` on stderr, exit 134
+3. *(DECIDED 2026-10-24)* **Traps**: `kliner: trap: MESSAGE` on stderr, exit 134
    (as `kliner-run`, C13.6). Integer `MIN / −1` wraps (no trap).
-4. *(PROPOSED)* **Only reachable functions** (from `main`, `$init`) are
+4. *(DECIDED 2026-10-24)* **Only reachable functions** (from `main`, `$init`) are
    emitted.
-5. *(PROPOSED)* **Static `ET_EXEC` at `0x400000`**, data at
+5. *(DECIDED 2026-10-24)* **Static `ET_EXEC` at `0x400000`**, data at
    `0x10000000`, with `.symtab` (no debug info, no PIE).
-6. *(PROPOSED)* **Tool name `kliner-build FILE.kl -o OUT`** (a single
+6. *(DECIDED 2026-10-24)* **Tool name `kliner-build FILE.kl -o OUT`** (a single
    `kliner` driver later); backend goldens in `tests/x64` whose
-   reference is `kliner-run` (not Klin) where Klin's C differs (K-B6).
-7. *(PROPOSED)* **No register allocator, no folding in stage 6**: every
+   reference is `kliner-run` (not Klin) where Klin's C differs. (Empty
+   since Klin `e6058dc` fixed K-B6: `c13` moved to `tests/ir`.)
+7. *(DECIDED 2026-10-24)* **No register allocator, no folding in stage 6**: every
    IR value lives in a frame slot; linear scan, constant folding,
    immediates and fused compare + branch move to stage 7.
