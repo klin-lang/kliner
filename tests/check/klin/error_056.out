@@ -1,0 +1,1 @@
+5:5: `.await` is only allowed inside `async fn`

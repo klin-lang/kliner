@@ -1,0 +1,5 @@
+struct Token { k: i32 }
+fn main() {
+  let rows: [1][1]Token = [[Token{ k: 1 }]]
+  let s = rows[:]
+}

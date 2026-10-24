@@ -1,0 +1,1 @@
+2:3: unknown function `unknown_c_fn` — declare it with `@[cimport]` (or use host builtins `puts` / `printf`)

@@ -1,0 +1,8 @@
+enum Color { Red, Green }
+fn main() {
+    let c: Color = Color.Red
+    match c {
+        Color.Red when 1 == 1 { }
+        Color.Green { }
+    }
+}

@@ -14,7 +14,7 @@ import out
 // Error code of a failed step (outside the errno range of `os`).
 pub const E_DIAG: i32 = 1000
 
-const MSG: i32 = 240
+const MSG: i32 = 1024
 
 pub struct Diag {
     path: []u8
@@ -95,6 +95,13 @@ pub fn fail(d: *mut Diag, off: i32, msg: []u8): i32 {
         add(d, msg)
     }
     return E_DIAG
+}
+
+// Drops a failure (the parser backtracks over `match` in `or { }`).
+pub fn clear(d: *mut Diag) {
+    (*d).failed = false
+    (*d).n = 0
+    (*d).note = b""
 }
 
 // Appends to the message (cut at the buffer size).

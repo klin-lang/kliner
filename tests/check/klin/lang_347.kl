@@ -1,0 +1,4 @@
+const Z: i32 = 0
+fn main() {
+  let buf: [Z]u8
+}

@@ -1,0 +1,4 @@
+const S: []u8 = b"ab"
+fn main() {
+  S[0] = 1
+}

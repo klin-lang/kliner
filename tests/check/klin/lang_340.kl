@@ -1,0 +1,13 @@
+struct Outer {
+  mid: Mid
+}
+struct Mid {
+  inner: Inner
+}
+struct Inner {
+  x: i32
+}
+fn main() {
+  let o = Outer{ mid: Mid{ inner: Inner{ x: 1 } } }
+  let _ = o.mid.inner.x
+}

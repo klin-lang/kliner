@@ -1,0 +1,6 @@
+struct Vec2 {
+  x: i32
+}
+fn main() {
+  Vec2{ 1 }.x = 2
+}

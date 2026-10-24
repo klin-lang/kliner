@@ -1,0 +1,3 @@
+@[isr("SysTick_Handler"), codename("Other_Handler")]
+fn tick() {}
+fn main() {}

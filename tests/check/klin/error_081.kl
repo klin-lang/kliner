@@ -1,0 +1,4 @@
+fn miss(): ![]u8 { return error(1) }
+fn main() {
+  let mut s = miss() or { b"fn" }
+}

@@ -1,0 +1,3 @@
+fn main() {
+    let x = pick true { 1 } { 2 }
+}

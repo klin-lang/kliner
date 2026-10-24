@@ -1,0 +1,4 @@
+struct Node {
+  kids: *mut [2]Node
+}
+fn main() {}

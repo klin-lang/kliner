@@ -1,0 +1,1 @@
+2:15: empty array literal needs an array type, for example `[0]u8`

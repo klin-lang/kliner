@@ -1,0 +1,1 @@
+3:12: unknown function `h` — declare it with `@[cimport]` (or use host builtins `puts` / `printf`)

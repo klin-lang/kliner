@@ -1,0 +1,8 @@
+struct Vec2 {
+  x: i32
+}
+fn (mut v: Vec2) bump() {
+  let mut v = Vec2{ 1 }
+  v.x = v.x + 1
+}
+fn main() {}

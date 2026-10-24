@@ -1032,11 +1032,53 @@ pub fn expr(p: *mut Parser): !i32 {
     return r
 }
 
+// `or { … }`: statements, then a final value. Without a final value
+// (`or { return }`, `or { break }`) a = -1; the checker requires that
+// every path diverges (Klin D21).
 fn or_block(p: *mut Parser): !i32 {
     let mut ok = 0
     let open = expect(p, lex.Tok.LBrace, b"expected `{` after `or`")!
     let base = sp(p)
     while !check(p, lex.Tok.RBrace) && !check(p, lex.Tok.Eof) {
+        if check(p, lex.Tok.Match) {
+            // `match` is an expression (the final value) or a statement
+            // whose arms return. Try the expression first, then reparse
+            // as a statement, like Klin.
+            let si = (*p).i
+            let sn = (*p).no_struct
+            let sd = (*p).paren
+            let ss = sp(p)
+            let e = expr(p) or {
+                if err != diag.E_DIAG {
+                    return error(err)
+                }
+                -1
+            }
+            if e >= 0 && check(p, lex.Tok.RBrace) {
+                advance(p)
+                let l = list(p, base)!
+                return node(p, ast.Nk.OrBlock, open, e, -1, -1, l)
+            }
+            let mut s = -1
+            if e >= 0 {
+                s = stmt_from_expr(p, e) or {
+                    if err != diag.E_DIAG {
+                        return error(err)
+                    }
+                    -1
+                }
+            }
+            if s < 0 {
+                (*p).i = si
+                (*p).no_struct = sn
+                (*p).paren = sd
+                (*(*p).t).sp = ss
+                diag.clear((*p).d)
+                s = match_any(p, false)!
+            }
+            ok = push(p, s)!
+            continue
+        }
         if can_start_expr(cur(p)) {
             let e = expr(p)!
             if check(p, lex.Tok.RBrace) {
@@ -1049,7 +1091,12 @@ fn or_block(p: *mut Parser): !i32 {
             ok = push(p, stmt(p)!)!
         }
     }
-    return error(fail(p, (*p).i, b"`or` block requires a final expression"))
+    if !check(p, lex.Tok.RBrace) {
+        return error(fail(p, (*p).i, b"unclosed `or` block"))
+    }
+    advance(p)
+    let l = list(p, base)!
+    return node(p, ast.Nk.OrBlock, open, -1, -1, -1, l)
 }
 
 // Binary operator levels, loosest first: 0 `||`, 1 `&&`, 2 `== !=`,

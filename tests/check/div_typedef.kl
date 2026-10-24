@@ -1,0 +1,3 @@
+struct Token { k: i32 }
+struct Hold { xs: []*mut [2]Token }
+fn main() {}

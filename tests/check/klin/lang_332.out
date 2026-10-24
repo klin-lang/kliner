@@ -1,0 +1,1 @@
+2:1: `isr` handler must take no parameters (vector ABI; match startup `.s`)

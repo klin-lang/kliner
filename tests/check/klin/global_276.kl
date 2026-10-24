@@ -1,0 +1,4 @@
+fn one(): i32 { return 1 }
+let mut xs: [3]i32 = [1, 2, 3]
+let mut mid: []i32 = xs[one():]
+fn main() {}

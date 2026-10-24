@@ -10,13 +10,13 @@ checkout. Format: [docs/03-ast-dump.md](../../docs/03-ast-dump.md).
 Files:
 
 - `ok_*.kl` — declarations, statements, expressions, line rules.
-- `err_*.kl` — one syntax error each (exit 1); `err_33` is a `$fn`
+- `err_*.kl` — one syntax error each (exit 1); `err_34` checks the `match` retry in `or { }` (D21); `err_33` is a `$fn`
   (lexer error + `note:` on stderr).
 - `div_*.kl` — known differences from Klin; the golden is Kliner's
   output, the Klin comparison skips them.
 
 The `ok_*` / `err_*` stdout goldens were written by Klin's parser (main
-d7625f1).
+d7625f1; `ok_or_diverge`, `err_26` and `err_34` by main a66ffbd, D21).
 
 ## Known differences from Klin's parser
 

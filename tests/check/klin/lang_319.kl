@@ -1,0 +1,2 @@
+module wrong
+pub fn n(): i32 { return 1 }

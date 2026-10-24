@@ -1,0 +1,5 @@
+const NEG: i32 = -100
+struct S {
+  data: [NEG]i32
+}
+fn main() {}

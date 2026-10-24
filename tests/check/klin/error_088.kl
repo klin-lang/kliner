@@ -1,0 +1,4 @@
+let kw: []u8 = b"fn"
+fn main() {
+  for s := kw; false; s = s {}
+}

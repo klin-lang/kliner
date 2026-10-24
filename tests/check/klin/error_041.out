@@ -1,0 +1,1 @@
+4:5: `match` on enum `error_041.Color` is not exhaustive (missing `Red`)

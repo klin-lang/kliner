@@ -1,0 +1,8 @@
+struct P { x: i32
+ y: i32 }
+fn main() {
+  let x: i32 = 0
+  let mut y: i32 = 0
+  let p = P{ x: 1, y: 2 }
+  { x, y } = p
+}

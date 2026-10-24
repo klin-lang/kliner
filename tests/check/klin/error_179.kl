@@ -1,0 +1,6 @@
+fn main() {
+  let a: [0]u8 = match 0 {
+    0 { [] }
+    else { [] }
+  }
+}

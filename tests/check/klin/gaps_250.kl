@@ -1,0 +1,6 @@
+fn g(): !i32 { return 1 }
+fn f(): i32 {
+  let n = g() or { break }
+  return n
+}
+fn main() {}

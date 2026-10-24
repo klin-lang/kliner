@@ -1,0 +1,15 @@
+fn g(): !i32 { return error(1) }
+fn f(): i32 {
+  let n = g() or {
+    if err == 1 { return 2 }
+    return 3
+  }
+  let m = g() or {
+    match 1 {
+      1 { return 8 }
+      else { return 9 }
+    }
+  }
+  return n + m
+}
+fn main() {}

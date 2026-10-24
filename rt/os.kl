@@ -11,6 +11,7 @@ pub const O_WRONLY: i64 = 1
 pub const O_RDWR: i64 = 2
 pub const O_CREAT: i64 = 0o100
 pub const O_TRUNC: i64 = 0o1000
+pub const O_DIRECTORY: i64 = 0o200000 // x86-64 (ARM64: 0o40000)
 pub const SEEK_SET: i64 = 0
 pub const SEEK_END: i64 = 2
 pub const PROT_READ: i64 = 1
@@ -22,6 +23,7 @@ pub const MAP_ANONYMOUS: i64 = 0x20
 pub const EINTR: i32 = 4
 pub const ENOMEM: i32 = 12
 pub const EINVAL: i32 = 22
+pub const ERANGE: i32 = 34
 
 pub struct Args {
     bytes: []u8 // all arguments, NUL-separated (as in /proc/self/cmdline)
@@ -170,4 +172,108 @@ pub fn (x: Args) arg_z(i: i32): []u8 {
 // exit_group: ends the process, does not run `defer`s — flush `out` first.
 pub fn exit(code: i32) {
     let r = sys.call6(sys.NR_EXIT_GROUP, cast(i64, code), 0, 0, 0, 0, 0)
+}
+
+// ---- paths (stage 4: the module loader) ----
+
+const S_IFMT: u32 = 0o170000
+const S_IFREG: u32 = 0o100000
+const S_IFDIR: u32 = 0o40000
+const DT_REG: u8 = 8
+
+// st_mode of path (stat, follows symlinks), 0 when it does not exist.
+// x86-64 `struct stat`: 144 bytes, st_mode (u32) at offset 24.
+fn mode(path: []u8): u32 {
+    let mut st: [144]u8
+    let r = sys.call6(sys.NR_NEWFSTATAT, AT_FDCWD, sys.addr_u8(path), sys.addr_u8(st[:]), 0, 0, 0)
+    if r != 0 {
+        return 0
+    }
+    return cast(u32, st[24]) | cast(u32, st[25]) << 8 | cast(u32, st[26]) << 16 | cast(u32, st[27]) << 24
+}
+
+// path: NUL-terminated. A regular file (or a symlink to one).
+pub fn is_file(path: []u8): bool {
+    return (mode(path) & S_IFMT) == S_IFREG
+}
+
+pub fn is_dir(path: []u8): bool {
+    return (mode(path) & S_IFMT) == S_IFDIR
+}
+
+// Working directory, without the NUL.
+pub fn getcwd(a: *mut arena.Arena): ![]u8 {
+    let mut buf = arena.alloc_u8(a, 4096)!
+    let n = check(sys.call6(sys.NR_GETCWD, sys.addr_u8(buf), 4096, 0, 0, 0, 0))!
+    return buf[0:cast(i32, n) - 1]
+}
+
+// Names of the regular files in directory path (NUL-terminated), in
+// kernel order, without "." / "..", subdirectories or symlinks
+// (getdents64 d_type == DT_REG). Each name is a slice into the arena.
+pub fn list_files(a: *mut arena.Arena, path: []u8): ![][]u8 {
+    let fd = check(sys.call6(sys.NR_OPENAT, AT_FDCWD, sys.addr_u8(path), O_RDONLY | O_DIRECTORY, 0, 0, 0))!
+    defer close_quiet(cast(i32, fd))
+    let mut names = arena.alloc_slices_u8(a, 64)!
+    let mut n = 0
+    let mut buf = arena.alloc_u8(a, 8192)!
+    while true {
+        let got = check(sys.call6(sys.NR_GETDENTS64, fd, sys.addr_u8(buf), 8192, 0, 0, 0))!
+        if got == 0 {
+            break
+        }
+        let mut p = 0
+        while p < cast(i32, got) {
+            // linux_dirent64: d_ino u64, d_off i64, d_reclen u16, d_type u8, d_name
+            let reclen = cast(i32, buf[p + 16]) | cast(i32, buf[p + 17]) << 8
+            if buf[p + 18] == DT_REG {
+                let mut e = p + 19
+                while buf[e] != 0 {
+                    e += 1
+                }
+                if n == names.len {
+                    let mut bigger = arena.alloc_slices_u8(a, n * 2)!
+                    for i in 0..<n {
+                        bigger[i] = names[i]
+                    }
+                    names = bigger
+                }
+                let mut name = arena.alloc_u8(a, e - p - 19)!
+                for i in 0..<name.len {
+                    name[i] = buf[p + 19 + i]
+                }
+                names[n] = name
+                n += 1
+            }
+            p += reclen
+        }
+    }
+    return names[0:n]
+}
+
+// Value of environment variable `name` (from /proc/self/environ), empty
+// when unset.
+pub fn getenv(a: *mut arena.Arena, name: []u8): ![]u8 {
+    let fd = open_read(b"/proc/self/environ\0")!
+    defer close_quiet(fd)
+    let env = read_all(a, fd, 0)!
+    let mut start = 0
+    for i in 0..<env.len {
+        if env[i] == 0 {
+            let e = env[start:i]
+            if e.len > name.len && e[name.len] == '=' {
+                let mut same = true
+                for j in 0..<name.len {
+                    if e[j] != name[j] {
+                        same = false
+                    }
+                }
+                if same {
+                    return e[name.len + 1:e.len]
+                }
+            }
+            start = i + 1
+        }
+    }
+    return env[0:0]
 }

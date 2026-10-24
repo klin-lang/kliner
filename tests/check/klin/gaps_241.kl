@@ -1,0 +1,7 @@
+fn g(): !i32 { return error(1) }
+fn f(): i32 {
+  let n = g() or { while true { return 4 } }
+  let m = g() or { for ;; { return 5 } }
+  return n + m
+}
+fn main() {}

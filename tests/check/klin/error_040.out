@@ -1,0 +1,1 @@
+4:13: `match` on enum `error_040.Color` is not exhaustive (missing `Blue`)

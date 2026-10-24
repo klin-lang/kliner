@@ -1,0 +1,2 @@
+fn first(s: []i32): *mut i32 { return &s[0] }
+fn main() {}

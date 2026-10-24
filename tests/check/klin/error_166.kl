@@ -1,0 +1,4 @@
+const N: u64 = ~0 + 0
+fn main() {
+  let buf: [N]u8
+}

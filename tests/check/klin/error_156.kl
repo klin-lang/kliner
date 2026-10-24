@@ -1,0 +1,2 @@
+fn at(p: *[]i32): *mut i32 { return &(*p)[0] }
+fn main() {}

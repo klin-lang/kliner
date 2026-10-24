@@ -1,0 +1,11 @@
+struct Out {
+  n: i32
+}
+struct Ctx {
+  err: Out
+}
+fn main() {
+  let mut ctx = Ctx{ err: Out{ n: 0 } }
+  let c: *Ctx = &ctx
+  let p: *mut Out = &(*c).err
+}

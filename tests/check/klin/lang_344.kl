@@ -1,0 +1,6 @@
+@[cinclude("regs.h")]
+@[cimport, cheader, codename("pin_toggle")]
+fn pin_toggle()
+fn main() {
+  pin_toggle()
+}

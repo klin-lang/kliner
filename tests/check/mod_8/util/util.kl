@@ -1,0 +1,5 @@
+module util
+pub enum Color: u8 {
+    Red
+    Green
+}

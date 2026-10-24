@@ -1,0 +1,2 @@
+fn take(xs: [1]i8) {}
+fn main() { take([200]) }

@@ -1,0 +1,6 @@
+fn main() {
+  let mut xs: [2]i32 = [1, 2]
+  let p: *mut [2]i32 = &xs
+  let s = (*p)[:]
+  s[0] = 9
+}

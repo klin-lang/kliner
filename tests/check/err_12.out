@@ -1,0 +1,1 @@
+2:8: condition requires type `bool`, got `untyped int`

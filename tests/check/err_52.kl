@@ -1,0 +1,16 @@
+fn f(): !i32 {
+    return 1
+}
+fn g(): !i32 {
+    let v = f()!
+    let w = f() or {
+        return error(err)
+    }
+    return v + w
+}
+fn main() {
+    let v = g() or {
+        0
+    }
+    let b: bool = v
+}

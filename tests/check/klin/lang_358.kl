@@ -1,0 +1,15 @@
+struct Row { kw: []u8 }
+fn take(s: []u8) {
+  let mut w = s
+  w[0] = 1
+}
+fn main() {
+  let s = b"fn"
+  let t = s
+  let mut buf: [2]u8 = [0, 0]
+  buf[0] = t[0]
+  buf[0] = buf[0] + 1
+  take(s)
+  let mut row = Row{ kw: b"ab" }
+  row.kw = b"fn"
+}

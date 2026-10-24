@@ -1,0 +1,9 @@
+enum A { X }
+enum B { Y }
+fn main() {
+  let a: A = A.X
+  let b: B = B.Y
+  if a == b {
+    puts("no")
+  }
+}

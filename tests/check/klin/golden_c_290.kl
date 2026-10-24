@@ -1,0 +1,2 @@
+@[link("driver.a")]
+fn main() {}

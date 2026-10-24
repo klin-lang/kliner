@@ -1,0 +1,4 @@
+fn main() {
+    let p: *i32 = cast(*i32, 0)
+    *p = 3
+}

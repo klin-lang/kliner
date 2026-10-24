@@ -26,6 +26,8 @@ runtime API) are **DECIDED (2026-10-23)** — see
 [C8](#c8-review-decisions--decided-2026-10-23). Questions opened by the
 sync with Klin main are in
 [C9](#c9-sync-with-klin-main--proposed) (**PROPOSED**, Marek decides).
+The stage 3 review (C10, the AST model, the roadmap numbering) is
+**DECIDED (2026-10-24)** — see [C11](#c11-stage-3-review--decided-2026-10-24).
 
 The Klin changes the compiler source relies on are **merged into Klin
 main**: [#351](https://github.com/klin-lang/klin/pull/351) to
@@ -108,7 +110,7 @@ fastest and simplest:
 This is the Zig / Carbon "data-oriented AST" layout. It also makes
 stage2 == stage3 easier: no pointer values end up in output.
 
-### AST — PROPOSED
+### AST — DECIDED (2026-10-24, C11.2)
 
 The stage 3 parser follows the data model above (`src/ast.kl`):
 
@@ -123,7 +125,7 @@ The stage 3 parser follows the data model above (`src/ast.kl`):
   (`Call`, `ForC`, `Let`) would need an extra list. Names are never
   copied: a name is the text of its token. Alternative: no `tok`, the
   position in `a` where needed — smaller nodes (20 instead of 24
-  bytes), more irregular layouts. Suggestion: keep `tok`.
+  bytes), more irregular layouts. **Decided: keep `tok`** (C11.2).
 - Types are nodes (`TName`, `TPtr`, `TSlice`, `TArray`, `TErr`,
   `TFn`); an array length keeps its token range for the checker.
 - A declaration is wrapped in `Decl` (attributes, `pub`, `async`).
@@ -197,12 +199,16 @@ The "was" column is the result on `757b782`.
 | — | `[65, 66]` as `[2]u8` initializer | typed as `[2]i32` | Takes the element type from context (D12) | #353 `b7e8894` |
 | — | `const X: u8 = 300`, `let x: i64 = -1`, `1 << 40` as `i64` | silent wrap; `-1` / `~7` / `1 << 40` are `i32` | Range error; unary `-` / `~` and constant expressions take the expected type (D12; C8.2, C8.3) | #352 `eccb0e1`, #353 `b7e8894`, #354 `db6bd2e` |
 
-Still open on Klin main (probed on `d7625f1`), none blocking:
+Still open on Klin main (probed on `d7625f1`, updated for `a66ffbd`), none blocking:
 
-- A free `fn` inside a `$fn` body is declared once per expansion →
-  `redeclaration of function` on the second expansion (use methods).
-- An `or { }` block must end in a value (`or { return }` is an error).
-- `str` cannot be measured, indexed or cast to an integer (C9.2).
+- ~~An `or { }` block must end in a value (`or { return }` is an
+  error).~~ Fixed in #359 `a66ffbd` (D21: `or { return … }`, `break`,
+  `continue`); the checker uses it.
+- ~~A free `fn` inside a `$fn` body is declared once per expansion
+  (`redeclaration of function`).~~ Fixed in #359 (D20: unique helper
+  names per expansion).
+- `str` cannot be cast to an integer (C9.2); since #359 (D22) it has
+  `s.len`, `s[i]` and `cstr_u8(s)` (Kliner does not use `str`).
 - `b"…"` reaching a mutable binding through a parameter or a return is
   still UB (C8.1).
 
@@ -690,9 +696,14 @@ changes C7 until he decides.
 
 ---
 
-## C10. `$fn` and string interpolation — PROPOSED
+## C10. `$fn` and string interpolation — DECIDED (2026-10-24)
 
-Stage 3 parses Klin without these two features; Marek decides later.
+**Decided (Marek, 2026-10-24): both stay out of Kliner for now** —
+1(c) and 2(b) below: Kliner sources use neither, the lexer keeps
+rejecting `$`, the parser keeps rejecting interpolation. Revisit (1(b),
+2(a)) when Kliner compiles user programs, after self-hosting.
+
+Stage 3 parses Klin without these two features.
 Today a file with `$` outside a string or comment fails in the lexer
 with Klin's message (``unexpected character `$` ``) plus a note, and a
 string with an unescaped `$` fails in the parser (`string
@@ -724,3 +735,22 @@ literal `$` and works.
    - *(b) Not in the core:* Kliner sources use `out.lit` / `out.dec`;
      interpolation only for user programs, after self-hosting.
    - Suggestion: (b) now, (a) together with a `fmt` runtime.
+
+---
+
+## C11. Stage 3 review — DECIDED (2026-10-24)
+
+Marek accepted the five recommendations of the stage 3 report when
+merging #4 (`8812306`):
+
+1. **`$fn` and string interpolation** stay out of Kliner for now (C10).
+2. **AST model:** `Node` keeps the `tok` field (C2 AST).
+3. **`fn` without a body in `module sys`** (Kliner intrinsics,
+   `rt/linux_x86_64/sys.kl`) stays a documented difference from Klin
+   (tests/parse `div_sys`, tests/check `div_lib_sys`).
+4. **`let mut ok = 0` … `ok = f()!`** stays the pattern for an ignored
+   `!T` result while `f()!` is not a statement in Klin.
+5. **Roadmap numbering:** 2 lexer, 3 parser, 4 checker; the later
+   stages moved by two (IR 5, backend 6, fuller language 7,
+   self-hosting 8, targets 9, after self-hosting 10) —
+   [01-roadmap.md](01-roadmap.md).

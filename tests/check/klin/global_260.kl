@@ -1,0 +1,6 @@
+pub let mut n: i32 = 1
+let limit: i32 = 2
+
+fn main() {
+    n = limit
+}

@@ -1,0 +1,4 @@
+fn main() {
+  let N: i32 = 4
+  let buf: [N]u8
+}

@@ -1,0 +1,11 @@
+struct Out {
+  n: i32
+}
+fn (mut o: Out) add() {
+  o.n = 1
+}
+fn main() {
+  let mut o = Out{ n: 0 }
+  let mut p: *Out = &o
+  (*p).add()
+}

@@ -1,3 +1,2 @@
 fn f() {
-    x := 1 or { return }
-}
+    x := 1 or { return

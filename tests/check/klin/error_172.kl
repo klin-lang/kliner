@@ -1,0 +1,2 @@
+fn row(a: [2][2]u8, i: i32): [2]u8 { return a[i] }
+fn main() {}

@@ -9,6 +9,9 @@
 #   3. parser (stage 3): tools/kliner-parse against the goldens in
 #      tests/parse and — same conditions — against Klin's own parser
 #      (tools/klin-parse.dart) on the same files.
+#   4. checker (stage 4): tools/kliner-check against the goldens in
+#      tests/check and — same conditions, plus KLIN_SRC/.dart_tool — against
+#      Klin's own checker (tools/klin-check.dart).
 #
 #   scripts/test.sh                 # klin from PATH, no Klin comparison
 #   KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
@@ -232,6 +235,76 @@ if build kliner-parse tools/kliner-parse -I "$ROOT/src"; then
         fi
     else
         echo "skip parse = klin (set KLIN_SRC to a Klin checkout, dart on PATH or DART)"
+    fi
+fi
+
+# --- stage 4: checker -------------------------------------------------
+# Goldens: tests/check/NAME.kl, tests/check/klin/NAME.kl (snippets from
+# Klin's test/pipeline_*_test.dart) and tests/check/NAME/main.kl (several
+# modules) -> NAME.out: `ok` (exit 0) or the first error `L:C: message`
+# (exit 1). *lib_* run with --lib (no `main` required). ok_*, err_*,
+# mod_* and klin/* were written by Klin's checker (tools/klin-check.dart);
+# div_* are known differences from Klin (docs/04-checker.md).
+if build kliner-check tools/kliner-check -I "$ROOT/src"; then
+    CHECK=$BIN
+    check_flags() { case $(basename "$1") in *lib_*) echo --lib ;; esac; }
+    for f in "$ROOT"/tests/check/*.kl "$ROOT"/tests/check/klin/*.kl "$ROOT"/tests/check/*/main.kl; do
+        case $f in */main.kl) n=${f%/main.kl} ;; *) n=${f%.kl} ;; esac
+        rc=1
+        [ "$(cat "$n.out")" = ok ] && rc=0
+        check "check ${n#"$ROOT"/tests/check/}" $rc "$n.out" "$TMP/empty" -- "$CHECK" $(check_flags "$n") "$f"
+    done
+    printf 'usage: kliner-check [--lib] [-I DIR]... FILE\n' >"$TMP/checkusage.err"
+    check "check usage" 2 "$TMP/empty" "$TMP/checkusage.err" -- "$CHECK"
+
+    # Same files through Klin's loader and checker: identical stdout and
+    # exit code. Expected differences, counted but not failures:
+    #  - Kliner rejects what it does not support yet (`str`, floats,
+    #    `pick`, `async`, interpolation, `asm`, remote imports): exit 1
+    #    with "... is not supported by Kliner yet";
+    #  - `$fn` / `$name(...)` (C10): Kliner stops at the `$`, Klin expands;
+    #  - rt/linux_x86_64/sys.kl: fns without a body in `module sys`;
+    #  - div_* goldens.
+    # Klin's checker imports packages beyond the parser's (crypto, xml):
+    # it builds with the checkout's .dart_tool/package_config.json
+    # (`dart pub get` in KLIN_SRC).
+    DART=${DART:-dart}
+    if [ -n "${KLIN_SRC:-}" ] && [ -f "$KLIN_SRC/.dart_tool/package_config.json" ] && command -v "$DART" >/dev/null 2>&1; then
+        if "$DART" compile exe --packages="$KLIN_SRC/.dart_tool/package_config.json" "$ROOT/tools/klin-check.dart" -o "$TMP/klin-check" >"$TMP/dartc.build" 2>&1; then
+            # vs_klin_check LABEL FLAGS FILE...
+            vs_klin_check() {
+                label=$1 flags=$2; shift 2
+                nf=0 bad=0 uns=0 mac=0 sys=0
+                for f in "$@"; do
+                    case $(basename "$f") in div_*) continue ;; esac
+                    nf=$((nf + 1))
+                    fl=$flags
+                    [ -z "$fl" ] && fl=$(check_flags "$f")
+                    "$TMP/klin-check" $fl -I "$ROOT/src" -I "$ROOT/rt" -I "$ROOT/rt/bootstrap" "$f" >"$TMP/d.chk" 2>&1; a=$?
+                    "$CHECK" $fl -I "$ROOT/src" -I "$ROOT/rt" -I "$ROOT/rt/bootstrap" "$f" >"$TMP/k.chk" 2>&1; b=$?
+                    if [ $a = $b ] && cmp -s "$TMP/d.chk" "$TMP/k.chk"; then continue; fi
+                    if [ $b = 1 ] && grep -q 'not supported by Kliner yet' "$TMP/k.chk"; then uns=$((uns + 1)); continue; fi
+                    if [ $b = 1 ] && grep -q 'unexpected character `\$`' "$TMP/k.chk"; then mac=$((mac + 1)); continue; fi
+                    case $f in */rt/linux_x86_64/sys.kl) if [ $b = 0 ]; then sys=$((sys + 1)); continue; fi ;; esac
+                    bad=$((bad + 1))
+                    echo "  differs: $f (exit klin $a, kliner $b)"
+                    echo "    klin:   $(head -1 "$TMP/d.chk")"
+                    echo "    kliner: $(head -1 "$TMP/k.chk")"
+                done
+                extra="$uns unsupported, $mac \$-macro"
+                [ $sys != 0 ] && extra="$extra, $sys body-less sys"
+                if [ $bad = 0 ]; then echo "ok   check = klin: $label ($nf files; expected differences: $extra)"; pass=$((pass + 1));
+                else echo "FAIL check = klin: $label ($bad of $nf files differ)"; fail=$((fail + 1)); fi
+            }
+            vs_klin_check "goldens" "" "$ROOT"/tests/check/*.kl "$ROOT"/tests/check/klin/*.kl "$ROOT"/tests/check/*/main.kl
+            vs_klin_check "kliner programs" "" "$ROOT"/tools/kliner-*/main.kl "$ROOT"/tests/rt/*/main.kl
+            vs_klin_check "kliner modules (--lib)" --lib $(find "$ROOT/src" "$ROOT/rt" -name '*.kl' | sort)
+            vs_klin_check "klin checkout" "" $(find "$KLIN_SRC" -name '*.kl' -not -path '*/out/*' -not -path '*/.dart_tool/*' | sort)
+        else
+            echo "FAIL build klin-check.dart"; sed 's/^/  /' "$TMP/dartc.build"; fail=$((fail + 1))
+        fi
+    else
+        echo "skip check = klin (set KLIN_SRC to a Klin checkout with .dart_tool from \`dart pub get\`, dart on PATH or DART)"
     fi
 fi
 

@@ -1,0 +1,6 @@
+fn main() {
+    let x: i64 = 3
+    for i in 0..<x {
+        let y: i32 = i
+    }
+}

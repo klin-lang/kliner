@@ -1,0 +1,5 @@
+struct Holder { n: i32 }
+fn main() {
+  let h = Holder{ n: 1 }
+  h.n(1)
+}

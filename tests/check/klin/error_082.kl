@@ -1,0 +1,3 @@
+fn main() {
+  for s := b"fn"; false; s = s {}
+}

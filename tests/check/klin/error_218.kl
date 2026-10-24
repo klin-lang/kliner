@@ -1,0 +1,5 @@
+module holder
+pub struct Holder {
+  cb: fn(i32): i32
+}
+fn (h: Holder) cb(x: i32): i32 { return x }

@@ -1,0 +1,11 @@
+struct S {
+    n: i32
+}
+fn S.get(s: S): i32 {
+    return s.n
+}
+fn main() {
+    let s = S{n: 0}
+    let x = s.get() + S.get(s)
+    let y: u8 = x
+}

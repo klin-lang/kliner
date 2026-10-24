@@ -1,0 +1,6 @@
+const N: i64 = 4
+
+fn main() {
+    let buf: [N]u8
+    let page: [os.PAGE]u8
+}

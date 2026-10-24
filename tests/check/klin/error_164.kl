@@ -1,0 +1,4 @@
+struct S { n: u8 }
+fn main() {
+  let s = S{ n: 200 + 100 }
+}

@@ -1,0 +1,7 @@
+struct Bus {
+  slots: [2]i32
+}
+fn (b: Bus) set(i: i32, v: i32) {
+  b.slots[i] = v
+}
+fn main() {}

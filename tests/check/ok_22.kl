@@ -1,0 +1,8 @@
+fn f(): !i32 {
+    return 1
+}
+fn main() {
+    let x = f() or {
+        puts(b"e")
+    }
+}

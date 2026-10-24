@@ -1,0 +1,4 @@
+import util
+fn main() {
+    let x = other.f()
+}

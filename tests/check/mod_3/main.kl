@@ -1,0 +1,7 @@
+import util
+fn main() {
+    let x = util.shown() + util.K
+    let p = util.P{a: 1}
+    let q = p.a
+    util.G = 3
+}

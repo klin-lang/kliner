@@ -1,0 +1,2 @@
+const X: u8 = 0x12C
+fn main() {}

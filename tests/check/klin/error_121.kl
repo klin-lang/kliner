@@ -1,0 +1,2 @@
+enum E: i8 { A = 127, B }
+fn main() {}

@@ -1,0 +1,8 @@
+struct Ctx {
+  n: i32
+}
+fn main() {
+  let mut ctx = Ctx{ n: 0 }
+  let c: *Ctx = &ctx
+  let p: *mut Ctx = &(*c)
+}

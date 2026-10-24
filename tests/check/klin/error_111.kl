@@ -1,0 +1,3 @@
+fn main() {
+  let buf: [1 + missing]u8
+}

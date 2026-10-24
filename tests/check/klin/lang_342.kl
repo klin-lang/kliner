@@ -1,0 +1,5 @@
+@[cimport]
+fn set_pin(value: u32)
+fn main() {
+  set_pin()
+}

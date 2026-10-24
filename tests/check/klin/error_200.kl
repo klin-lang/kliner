@@ -1,0 +1,5 @@
+fn main() {
+  let xs: [2]i32 = [1, 2]
+  let p = cast(*[2]i32, cast(usize, &xs))
+  (*p)[:][0] = 9
+}

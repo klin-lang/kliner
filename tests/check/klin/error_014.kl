@@ -1,0 +1,4 @@
+fn make(): i32 { return 1 }
+fn main() {
+  let [a, b] = make()
+}

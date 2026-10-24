@@ -1,0 +1,5 @@
+fn main() {
+  let mut xs: [2]u8 = [1, 2]
+  let mut s = xs[:]
+  s = b"ab"[1:]
+}

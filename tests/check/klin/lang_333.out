@@ -1,0 +1,1 @@
+2:1: `isr` handler must return void (or omit the return type)

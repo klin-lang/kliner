@@ -1,0 +1,13 @@
+struct Pair { n: u8 }
+struct Box { xs: [0]u8 }
+fn take(xs: [0]u8): i32 { return xs.len }
+fn main() {
+  let a: [0]u8 = []
+  let nested: [1][0]u8 = [[]]
+  let row: [2][0]u8 = [[], []]
+  let none: [0]Pair = []
+  let b = Box{ xs: [] }
+  let c = Box{ [] }
+  let n = take([])
+  let inner = nested[0].len
+}

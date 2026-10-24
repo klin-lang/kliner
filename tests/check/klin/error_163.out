@@ -1,0 +1,1 @@
+1:25: integer literal `300` is out of range for `u8` (0..=255)

@@ -1,0 +1,62 @@
+unit module=-
+  fn @1:1 name="f" npos=@1:4 pub=0 async=0 assoc=- ret="!i32"
+    param @1:6 name="k" type="i32"
+    block @1:20
+      let @2:5 name="x" mut=1 short=1 type=-
+        or @2:14
+          call @2:10 mod=- name="g"
+          or-block @2:17 n=1
+            return @2:19
+      let @3:5 name="y" mut=1 short=1 type=-
+        or @3:14
+          call @3:10 mod=- name="g"
+          or-block @3:17 n=0
+            match-expr @3:19
+              name @3:25 v="k"
+              arm guard=0
+                pat-lit @3:29
+                  int @3:29 v="1"
+                int @3:33 v="0"
+              arm guard=0
+                pat-else @3:37
+                int @3:44 v="1"
+      let @4:5 name="z" mut=1 short=1 type=-
+        or @4:14
+          call @4:10 mod=- name="g"
+          or-block @4:17 n=1
+            match @4:19
+              name @4:25 v="k"
+              arm guard=0
+                pat-lit @4:29
+                  int @4:29 v="1"
+                block @4:31
+                  return @4:33
+                    int @4:40 v="0"
+              arm guard=0
+                pat-else @4:44
+                block @4:49
+                  return @4:51
+                    int @4:58 v="1"
+      let @5:5 name="w" mut=1 short=1 type=-
+        or @5:14
+          call @5:10 mod=- name="g"
+          or-block @5:17 n=2
+            match @6:9
+              name @6:15 v="k"
+              arm guard=0
+                pat-lit @6:19
+                  int @6:19 v="1"
+                block @6:21
+                  call @6:23 mod=- name="h"
+              arm guard=0
+                pat-else @6:29
+                block @6:34
+                  call @6:36 mod=- name="h"
+            break @7:9
+      let @9:5 name="v" mut=1 short=1 type=-
+        or @9:14
+          call @9:10 mod=- name="g"
+          or-block @9:17 n=1
+            continue @9:19
+      return @10:5
+        int @10:12 v="0"

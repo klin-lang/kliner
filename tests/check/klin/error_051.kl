@@ -1,0 +1,2 @@
+module lib
+fn secret(): i32 { return 1 }

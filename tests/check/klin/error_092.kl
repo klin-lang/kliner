@@ -1,0 +1,4 @@
+const KW: []u8 = b"fn"
+fn main() {
+  let mut s = KW[0:1]
+}

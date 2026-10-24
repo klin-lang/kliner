@@ -1,0 +1,1 @@
+5:5: result `!i32` from function `f` must be handled with `!` or `or`
