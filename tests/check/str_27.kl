@@ -1,0 +1,6 @@
+fn main() {
+    let mut s = "abc"
+    s = "d"
+    let i: i64 = 1
+    let c = s[i]
+}

@@ -1,0 +1,4 @@
+fn main() {
+    let s = "abc"
+    let b: u8 = s[1]
+}

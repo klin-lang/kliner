@@ -1,0 +1,3 @@
+fn main() {
+    let b = cstr_u8()
+}

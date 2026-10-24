@@ -1,0 +1,4 @@
+fn main() {
+    let mut s = "abc"
+    let p: *mut u8 = &s[0]
+}

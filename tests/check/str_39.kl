@@ -1,0 +1,4 @@
+let mut g: str
+fn main(): i32 {
+    return g.len
+}

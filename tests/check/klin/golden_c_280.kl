@@ -1,0 +1,6 @@
+fn main() {
+  defer puts("a")
+  puts("body")
+  return
+  defer puts("b")
+}

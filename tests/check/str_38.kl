@@ -1,0 +1,5 @@
+fn main(): i32 {
+    let s = "a\0b"
+    let b = cstr_u8(s)
+    return s.len * 10 + b.len
+}

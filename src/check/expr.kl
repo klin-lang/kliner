@@ -820,7 +820,7 @@ fn infer0(c: *mut Ck, e: i32): !i32 {
             return types.BOOL
         }
         ast.Nk.Str {
-            return error(unsupported(c, x.tok, b"`str`"))
+            return types.STR
         }
         ast.Nk.Bytes {
             return mk_slice(c, types.U8)
@@ -943,6 +943,13 @@ fn infer_get(c: *mut Ck, e: i32): !i32 {
     if tab.eq(name, b"len") && (ok == types.Tk.Array || ok == types.Tk.Slice) {
         return types.I32
     }
+    // `s.len` is `strlen`, every time, as `i32` (D22). Not a field.
+    if ok == types.Tk.Str {
+        if tab.eq(name, b"len") {
+            return types.I32
+        }
+        return error(fail3(c, x.tok, b"`str` has no field `", name, b"` (`.len` is the byte length; `cstr_u8` builds a read-only `[]u8`)"))
+    }
     if ok != types.Tk.Struct {
         return error(failt(c, x.tok, b"field access requires a struct, got `", ot, b"`"))
     }
@@ -977,6 +984,10 @@ fn infer_index(c: *mut Ck, e: i32): !i32 {
     if k == types.Tk.Array || k == types.Tk.Slice {
         return elem(c, ot)
     }
+    // `s[i]` is one byte. No bounds check. The byte is read-only.
+    if k == types.Tk.Str {
+        return types.U8
+    }
     return error(failt(c, x.tok, b"indexing requires an array, slice, or `str`, got `", ot, b"`"))
 }
 
@@ -1004,6 +1015,8 @@ fn infer_slice(c: *mut Ck, e: i32): !i32 {
         el = elem(c, src)
     } else if kind(c, src) == types.Tk.Slice {
         el = elem(c, src)
+    } else if kind(c, src) == types.Tk.Str {
+        return error(fail(c, x.tok, b"`str` has no subslice; `cstr_u8(s)` is a read-only `[]u8`"))
     } else {
         return error(failt(c, x.tok, b"a slice range requires an array or slice, got `", src, b"`"))
     }
@@ -1319,6 +1332,11 @@ fn is_mut_place(c: *mut Ck, e: i32): !bool {
         return is_mut_place(c, x.a)
     }
     if x.kind == ast.Nk.Index {
+        // `s[i]` on a `str` reads a byte; the variable may be `mut`, the
+        // byte is not.
+        if get_rt(c, x.a) == types.STR {
+            return false
+        }
         return is_mut_place(c, x.a)
     }
     if x.kind == ast.Nk.Slice {
@@ -1486,8 +1504,11 @@ fn check_target(c: *mut Ck, t: i32, pos: i32): !i32 {
             return error(fail3(c, pos, b"cannot assign to constant `", txt(c, x.tok), b"`"))
         }
         let ot = infer(c, x.a)!
-        if kind(c, ot) == types.Tk.Array || kind(c, ot) == types.Tk.Slice {
+        if kind(c, ot) == types.Tk.Array || kind(c, ot) == types.Tk.Slice || (ot == types.STR && tab.eq(txt(c, x.tok), b"len")) {
             return error(fail(c, pos, b"`len` is read-only"))
+        }
+        if ot == types.STR {
+            return error(fail3(c, pos, b"`str` has no field `", txt(c, x.tok), b"`"))
         }
         let mut ok = require_mut_place(c, x.a, pos, b"cannot assign to a field of an immutable variable", b"cannot assign to a field of an immutable expression")!
         return infer(c, p)
@@ -1504,6 +1525,9 @@ fn check_target(c: *mut Ck, t: i32, pos: i32): !i32 {
     }
     if x.kind == ast.Nk.Index {
         let ot = infer(c, x.a)!
+        if ot == types.STR {
+            return error(fail(c, pos, b"cannot assign through a string (`str` is read-only)"))
+        }
         if kind(c, ot) == types.Tk.Slice {
             let root = slice_root(c, x.a)
             if nk(c, root) == ast.Nk.Bytes {
@@ -1629,7 +1653,11 @@ fn check_call(c: *mut Ck, e: i32): !i32 {
                 return error(e6)
             }
             let at = infer(c, kid(c, x.extra, 0))!
-            return error(failt(c, tok_of(c, kid(c, x.extra, 0)), b"`cstr_u8` expects `str`, got `", at, b"`"))
+            if at != types.STR {
+                return error(failt(c, tok_of(c, kid(c, x.extra, 0)), b"`cstr_u8` expects `str`, got `", at, b"`"))
+            }
+            set_fl(c, e, F_CSTR)
+            return mk_slice(c, types.U8)
         }
         if tab.eq(callee, b"puts") || tab.eq(callee, b"printf") {
             for i in 0..<cnt(c, x.extra) {

@@ -1,0 +1,4 @@
+fn main() {
+    let s = "a"
+    let x = cast(i64, s)
+}

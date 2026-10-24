@@ -236,6 +236,9 @@ fn addt(c: *mut Ck, id: i32) {
         types.Tk.UEmpty {
             madd(c, b"[0]")
         }
+        types.Tk.Str {
+            madd(c, b"str")
+        }
         types.Tk.BareErr {
             madd(c, b"error")
         }

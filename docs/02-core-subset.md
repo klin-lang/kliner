@@ -207,8 +207,9 @@ Still open on Klin main (probed on `d7625f1`, updated for `a66ffbd`), none block
 - ~~A free `fn` inside a `$fn` body is declared once per expansion
   (`redeclaration of function`).~~ Fixed in #359 (D20: unique helper
   names per expansion).
-- `str` cannot be cast to an integer (C9.2); since #359 (D22) it has
-  `s.len`, `s[i]` and `cstr_u8(s)` (Kliner does not use `str`).
+- `str` cannot be cast to an integer; since #359 (D22) it has
+  `s.len`, `s[i]` and `cstr_u8(s)`. Kliner's checker supports `str`
+  since stage 4 (C12.3); compiler code still uses `[]u8`.
 - `b"…"` reaching a mutable binding through a parameter or a return is
   still UB (C8.1).
 
@@ -382,9 +383,10 @@ Not Klin source. A few instructions generated per target:
 
 v0 reads arguments from **`/proc/self/cmdline`** (NUL-separated) in
 `os.args` (C7.4) — identical in both stages, no backend magic. Klin main
-now has `fn main(args: []str)` (G10, D18), but its elements are `str`
-(no `.len`, no indexing, no cast), so using it needs one more runtime
-function; that option is C9.2 (PROPOSED). Later, `_start` passes
+now has `fn main(args: []str)` (G10, D18); since D22 its `str`
+elements can be read with `s.len`, `s[i]` and `cstr_u8(s)`, and Kliner
+checks them (C12.3). Switching to it is the option in C9.2 / C12.4;
+v0 keeps `/proc` (C7.4). Later, `_start` passes
 `argc` / `argv` and the `/proc` dependency goes away.
 
 ### Errors: errno → `!T`
@@ -678,12 +680,11 @@ changes C7 until he decides.
    - Suggestion: (a) for v0; reconsider (b) when the backend has a data
      section anyway.
 2. **Arguments via `fn main(args: []str)`** (#355, D18) instead of
-   `/proc/self/cmdline` (C7.4). Probed: `args.len` is `argc`, but a
-   `str` element has no `.len`, no indexing and no `cast` to an integer,
-   so core Klin cannot read its bytes. It needs one runtime function,
-   e.g. `sys.cstr_u8(s: str): []u8` (bootstrap: `strlen` in the shim;
-   Kliner: intrinsic), and Kliner must accept `str` in the `main`
-   signature. Gain: no `/proc` dependency, the same source in both
+   `/proc/self/cmdline` (C7.4). Probed on `824e4af`: `args.len` is
+   `argc`, but a `str` element had no `.len` and no indexing. *Update
+   (`a66ffbd`, D22):* `s.len`, `s[i]` and the builtin `cstr_u8(s)` exist
+   and Kliner accepts `str` and `main(args: []str)` (C12.3), so no shim
+   function is needed any more — see C12.4. Gain: no `/proc` dependency, the same source in both
    stages once `_start` passes `argc` / `argv`. Suggestion: keep
    `/proc/self/cmdline` in v0; switch together with `_start` passing
    the arguments.
@@ -754,3 +755,30 @@ merging #4 (`8812306`):
    stages moved by two (IR 5, backend 6, fuller language 7,
    self-hosting 8, targets 9, after self-hosting 10) —
    [01-roadmap.md](01-roadmap.md).
+
+## C12. Stage 4 review — DECIDED (2026-10-24)
+
+Marek answered "yes" to the three points of the stage 4 report (PR #5):
+
+1. **Partial port of the "complete type" check** (C typedefs of struct
+   fields such as `[]*mut [2]Token`, an `fn` field returning an array of
+   structs; Klin `error_175`, `error_207`–`209`) is enough. Kliner's
+   backend emits no C typedefs; the difference stays documented
+   ([04-checker.md](04-checker.md), tests/check `div_typedef`).
+2. **Klin bugs K-B1 and K-B2** (04-checker.md) were reported to the Klin
+   bot on 2026-10-24; nothing is changed in the Klin repo from here.
+3. **`str` is in Kliner now** (D22, Klin main `a66ffbd`): string
+   literals `"…"` have type `str`; `s.len` is `strlen` as `i32`
+   (read-only); `s[i]` is `u8`, read-only (`cannot assign through a
+   string`); no subslice; `cstr_u8(s)` is a read-only `[]u8` (builtin);
+   `main(args: []str)`; `str` as a local, global, field, parameter or
+   slice element. Not: `const X: str`, `cast` from / to `str`,
+   arithmetic or `==` on `str`, `match` on `str` (same errors as Klin).
+   String interpolation stays a parser error (C10). Compiler code keeps
+   using `[]u8` / `b"…"` (C7.1).
+4. **Arguments (option, not a change):** with (3), `fn main(args: []str)`
+   plus `cstr_u8(args[i])` gives the argument bytes without
+   `/proc/self/cmdline` and without a shim function. v0 keeps
+   `/proc/self/cmdline` (C7.4); the switch happens together with
+   `_start` passing `argc` / `argv` (C6), and needs only `os.args` to
+   change.

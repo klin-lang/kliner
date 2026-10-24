@@ -19,6 +19,7 @@ pub enum Tk: u8 {
     UInt // untyped integer literal
     UEmpty // `[]` without a type
     BareErr // `error(code)` without a `!T` context
+    Str // `str`: a C string (D22)
 }
 
 pub enum P: u8 {
@@ -46,6 +47,7 @@ pub const VOID: i32 = 13
 pub const UINT: i32 = 14
 pub const UEMPTY: i32 = 15
 pub const BARE: i32 = 16
+pub const STR: i32 = 17
 
 pub struct Ty {
     kind: Tk
@@ -85,6 +87,7 @@ pub fn Types.new(a: *mut arena.Arena): !Types {
     ok = intern(&t, a, Tk.UInt, 0, 0, 0)!
     ok = intern(&t, a, Tk.UEmpty, 0, 0, 0)!
     ok = intern(&t, a, Tk.BareErr, 0, 0, 0)!
+    ok = intern(&t, a, Tk.Str, 0, 0, 0)!
     return t
 }
 

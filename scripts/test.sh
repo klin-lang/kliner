@@ -259,7 +259,7 @@ if build kliner-check tools/kliner-check -I "$ROOT/src"; then
 
     # Same files through Klin's loader and checker: identical stdout and
     # exit code. Expected differences, counted but not failures:
-    #  - Kliner rejects what it does not support yet (`str`, floats,
+    #  - Kliner rejects what it does not support yet (floats,
     #    `pick`, `async`, interpolation, `asm`, remote imports): exit 1
     #    with "... is not supported by Kliner yet";
     #  - `$fn` / `$name(...)` (C10): Kliner stops at the `$`, Klin expands;

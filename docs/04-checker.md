@@ -26,11 +26,14 @@ can be compared byte for byte.
   from AST type nodes.
 - **Types** `src/types.kl` — interned types (`Tk`: prim, struct, enum,
   `*T` / `*mut T`, `[N]T`, `[]T`, `fn`, `!T`, untyped int, `[]`,
-  bare `error`); equal types have equal ids.
+  bare `error`, `str`); equal types have equal ids.
 - **Expressions** `expr.kl` — literals with the expected type
   (D12), operators, casts, calls, methods (`mut` receivers), field
   calls (D16), indexing and slicing (D15, D19), `b"…"` read-only
-  bytes (D10, C8.1), `!T`, `!`, `or { }` (D21), `error(code)`.
+  bytes (D10, C8.1), `!T`, `!`, `or { }` (D21), `error(code)`;
+  `str` (D22, C12.3): `"…"` is `str`, `s.len` `i32` and `s[i]` `u8`
+  (both read-only), no subslice, `cstr_u8(s)` a read-only `[]u8`,
+  `main(args: []str)`.
 - **Statements** `stmt.kl` — `let` / `let mut` (also struct and array
   destructuring), assignment and compound assignment, mutability
   (`cannot assign to …`), `match` (exhaustiveness of enums, arm order),
@@ -58,18 +61,21 @@ token.
 
 - Goldens in `tests/check/` ([README](../tests/check/README.md)):
   `ok_*` / `err_*` (own cases), `mod_*/` (multi-module projects),
-  `klin/` (277 snippets from Klin's `test/pipeline_*_test.dart` on which
+  `klin/` (292 snippets from Klin's `test/pipeline_*_test.dart` on which
   both checkers agree), `div_*` (known differences, Kliner's output).
 - With `KLIN_SRC` set, `kliner-check` vs `klin-check` on:
 
 | Set | Files | Equal | Expected differences |
 |---|---|---|---|
-| goldens (`tests/check`) | 347 | 347 | — (`div_*` skipped) |
+| goldens (`tests/check`) | 402 | 402 | — (`div_*` skipped) |
 | Kliner programs (`tools/*/main.kl`) | 7 | 7 | — |
 | Kliner modules (`src/`, `rt/`, `--lib`) | 17 | 16 | 1 body-less `sys` fn |
-| Klin checkout (all `.kl`) | 379 | 118 | 244 unsupported feature, 17 `$`-macro |
+| Klin checkout (all `.kl`) | 379 | 245 | 117 unsupported (90 remote imports `github/…`; 27 features: `pick` 11, `f64` / `float` 8, interpolation 4, `async fn` 3, `volatile` 1), 17 `$`-macro |
 
-The snippet corpus (365 snippets): 278 agree; 48 use features Kliner
+Before `str` (C12.3) the checkout had 244 unsupported files and 118
+equal: 127 files moved to equal, none to a difference.
+
+The snippet corpus (365 snippets): 307 agree; 36 use features Kliner
 does not support; the rest are `$` macros, snippets needing files that
 are not extracted, and the four late-typedef cases below.
 
@@ -77,17 +83,18 @@ are not extracted, and the four late-typedef cases below.
 
 | Case | Klin | Kliner | Test |
 |---|---|---|---|
-| `str` (also `main(args: []str)`), float types / literals, `pick`, `async fn`, `asm`, `volatile` | checked | ``X is not supported by Kliner yet`` at the first use (string interpolation: already the parser, stage 3) | `div_str`, `div_float`, `div_pick`, `div_async` |
-| `cstr_u8(s)` (D22) | checked | always an error (needs `str`) | — |
+| float types / literals, `pick`, `async fn`, `asm`, `volatile` | checked | ``X is not supported by Kliner yet`` at the first use (string interpolation: already the parser, stage 3) | `div_float`, `div_pick`, `div_async` |
 | `$fn` / `$name(…)` | expanded before lexing | lexer error (C10, DECIDED) | tests/parse `err_33` |
 | `fn` without a body in `module sys` | ``expected `{` `` | ok | `div_lib_sys` |
-| "complete type" check for struct fields such as `[]*mut [2]Token` and an `fn` field returning an array of structs (Klin `error_175`, `error_207`–`209`) | error | ok — partial port; Kliner's backend has no C typedefs | `div_typedef` |
+| "complete type" check for struct fields such as `[]*mut [2]Token` and an `fn` field returning an array of structs (Klin `error_175`, `error_207`–`209`) | error | ok — partial port; Kliner's backend has no C typedefs (DECIDED C12.1) | `div_typedef` |
 | remote imports `github/…` | fetched | load error | — |
 | stdlib lookup | `KLIN_STDLIB`, upward from cwd, next to the binary | `KLIN_STDLIB` only | — |
 
 ## Klin bugs (not fixed, repros)
 
 Found in stage 4 on `a66ffbd` (`klin FILE`):
+
+K-B1 and K-B2 were reported to the Klin bot on 2026-10-24 (C12.2).
 
 - **K-B1** `puts` / extern calls are not type-checked against the C
   prototype; gcc fails:
@@ -113,7 +120,22 @@ Found in stage 4 on `a66ffbd` (`klin FILE`):
   prints the same text (port).
 - **K-B3** (from stage 3, still open) diagnostics in an imported module
   carry the entry file's path; a parse error doubles the path
-  (`main.kl:/abs/m.kl:2:10: …`).
+  (`main.kl:/abs/m.kl:2:10: …`). Also for the entry file itself: a
+  lexer or parser error prints `r7.kl:/tmp/sp/r7.kl:2:9: expected
+  variable name` (`fn main() {` / `let = 1` / `}`).
+- **K-B4** (found with `str`, 2026-10-24) a zero-initialised `str` is a
+  NULL `const char *`; `s.len` (`strlen`), `s[i]` and `cstr_u8(s)` then
+  crash (SIGSEGV, exit 139). The checker accepts it:
+  ```kl
+  fn main(): i32 {
+      let s: str
+      return s.len
+  }
+  ```
+  Same with a `str` struct field of a zeroed struct (`let t: T` /
+  `t.name.len`) and a global `let mut g: str`. Expected: either `""` as
+  the zero value of `str`, or a checker error for a `str` without an
+  initializer. Kliner matches Klin's checker (ok).
 - Proposals (behaviour, maybe intended): a constant out-of-range index
   on a fixed array passes and runs silently
   (`let a = [1, 2, 3]` / `return a[5]` → exit 0); a duplicate integer

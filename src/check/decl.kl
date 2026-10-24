@@ -557,7 +557,7 @@ fn register_globals(c: *mut Ck): !i32 {
 
 fn reject_global_type(c: *mut Ck, ty: i32, whole: i32, pos: i32): !i32 {
     let k = kind(c, ty)
-    if k == types.Tk.Prim || k == types.Tk.Enum || k == types.Tk.Struct || k == types.Tk.Ptr || k == types.Tk.Slice || k == types.Tk.Fn {
+    if k == types.Tk.Prim || k == types.Tk.Str || k == types.Tk.Enum || k == types.Tk.Struct || k == types.Tk.Ptr || k == types.Tk.Slice || k == types.Tk.Fn {
         return 0
     }
     if k == types.Tk.Array {
@@ -865,10 +865,17 @@ fn check_main_sig(c: *mut Ck, i: i32): !i32 {
     let r = (*(*c).p).funcs.r[i]
     at(c, r)
     let x = nd(c, r.node)
-    if cnt(c, nd(c, x.c).extra) == 0 {
+    let n = cnt(c, nd(c, x.c).extra)
+    if n == 0 {
         return 0
     }
-    // `[]str` is not supported, so any parameter is an error here
+    // `[]str` is the argv header (D18).
+    if n == 1 {
+        let t = fn_pty(c, i, 0)
+        if t >= 0 && kind(c, t) == types.Tk.Slice && elem(c, t) == types.STR {
+            return 0
+        }
+    }
     return error(fail(c, x.tok, b"`main` takes no parameters, or one parameter of type `[]str`"))
 }
 

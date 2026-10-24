@@ -1,0 +1,4 @@
+fn main() {
+    let mut s = "abc"
+    s.len = 1
+}

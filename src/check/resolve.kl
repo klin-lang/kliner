@@ -201,7 +201,7 @@ fn resolve_tname(c: *mut Ck, ntok: i32, atok: i32, pos: i32): !i32 {
             return types.VOID
         }
         if tab.eq(name, b"str") {
-            return error(unsupported(c, pos, b"`str`"))
+            return types.STR
         }
     }
     let mut m = (*c).cm
@@ -274,7 +274,7 @@ fn fn_type(c: *mut Ck, ps: []i32, ret: i32): !i32 {
 
 fn require_slice_elem(c: *mut Ck, e: i32, pos: i32): !i32 {
     let k = kind(c, e)
-    if k == types.Tk.Prim || k == types.Tk.Struct || k == types.Tk.Enum || k == types.Tk.Ptr || k == types.Tk.Fn {
+    if k == types.Tk.Prim || k == types.Tk.Struct || k == types.Tk.Enum || k == types.Tk.Str || k == types.Tk.Ptr || k == types.Tk.Fn {
         return 0
     }
     if k == types.Tk.Slice {

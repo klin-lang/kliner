@@ -6,8 +6,8 @@ and ELF64 binaries itself — no C, no libc, no LLVM in the default path.
 
 > **Status: stage 4 (frontend), checker done.** Runtime in Klin (`rt/`),
 > lexer (`src/lex.kl`), parser (`src/parse.kl`), checker (`src/check/`)
-> — Klin without `$fn`, string interpolation, `str`, floats, `pick`,
-> `async`; no IR / backend yet.
+> — Klin without `$fn`, string interpolation, floats, `pick`,
+> `async` (`str` is supported, C12.3); no IR / backend yet.
 
 ```sh
 KLIN=/path/to/klin scripts/test.sh     # build + run tests/rt, tests/lex, tests/parse, tests/check with Klin (Linux x86-64)

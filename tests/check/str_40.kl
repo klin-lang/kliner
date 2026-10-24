@@ -1,0 +1,4 @@
+fn main(args: []str): i32 {
+    let b = cstr_u8(args[0])
+    return cast(i32, b[0])
+}

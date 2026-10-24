@@ -1,0 +1,5 @@
+fn main() {
+    let s = "a"
+    let p = &s
+    let n = (*p).len
+}

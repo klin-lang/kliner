@@ -1,0 +1,5 @@
+fn take(b: []u8) {
+}
+fn main() {
+    take("abc")
+}
