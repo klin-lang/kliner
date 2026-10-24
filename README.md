@@ -4,14 +4,16 @@ Kliner is a native, self-hosted compiler with
 [Klin](https://github.com/klin-lang/klin) syntax. It writes machine code
 and ELF64 binaries itself — no C, no libc, no LLVM in the default path.
 
-> **Status: stage 5, IR + IR interpreter done.** Runtime in Klin (`rt/`),
+> **Status: stage 6, x86-64 backend done.** Runtime in Klin (`rt/`),
 > lexer (`src/lex.kl`), parser (`src/parse.kl`), checker (`src/check/`)
 > — Klin without `$fn`, string interpolation, floats, `pick`,
 > `async` (`str` is supported, C12.3); linear IR (`src/ir/`) and its
-> interpreter (`src/vm/`); no native backend yet (stage 6).
+> interpreter (`src/vm/`); x86-64 code generator and static ELF64
+> writer (`src/x64/`, no libc, no linker): `kliner-build` compiles
+> Kliner's own tools — and itself, to a byte-identical fixpoint.
 
 ```sh
-KLIN=/path/to/klin scripts/test.sh     # build + run tests/rt, tests/lex, tests/parse, tests/check, tests/ir with Klin (Linux x86-64)
+KLIN=/path/to/klin scripts/test.sh     # build + run tests/rt, tests/lex, tests/parse, tests/check, tests/ir, tests/x64 with Klin (Linux x86-64)
 KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
                                        # + compare lexer, parser and checker with Klin's own (needs dart)
 ```
@@ -34,6 +36,12 @@ KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
 - `src/ir/` — linear IR and the lowering from the checked AST ([docs](docs/05-ir.md)); `src/vm/` — IR interpreter
 - `tools/kliner-ir/` — `kliner-ir [-I DIR]... FILE` IR dump; `tools/kliner-run/` — `kliner-run [-I DIR]... FILE.kl [ARG]...` (interprets, e.g. `-I rt/linux_x86_64 -I rt -I src`)
 - `tests/ir/` — program goldens (stdout + exit code), compared with the Klin-built binaries
+- `src/x64/` — x86-64 encoder, code generator, ELF64 writer ([docs](docs/06-x86-64.md)); `tools/kliner-build/` — `kliner-build [-I DIR]... FILE.kl -o OUT` (e.g. `-I rt/linux_x86_64 -I rt -I src`)
+- `tests/x64/` — backend goldens (= `kliner-run`; Klin's C differs on shifts, K-B6)
+
+```sh
+tools/kliner-build/out/main -I rt/linux_x86_64 -I rt tests/rt/hello/main.kl -o hello && ./hello
+```
 
 - [Design decisions](docs/00-decisions.md)
 - [Roadmap](docs/01-roadmap.md)
@@ -41,4 +49,5 @@ KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
 - [AST dump format](docs/03-ast-dump.md)
 - [Checker](docs/04-checker.md)
 - [IR and interpreter](docs/05-ir.md)
+- [x86-64 backend and ELF64](docs/06-x86-64.md)
 - Klin (compiles to C, bootstraps Kliner): https://github.com/klin-lang/klin

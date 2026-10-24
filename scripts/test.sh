@@ -17,6 +17,12 @@
 #      same as the Klin-built binaries), kliner-ir dumps tests/ir/only/dump,
 #      and kliner-lex / kliner-parse / kliner-check / kliner-ir run under
 #      kliner-run give the same output as their Klin-built binaries.
+#   6. x86-64 backend (stage 6): tools/kliner-build compiles the tests/rt
+#      demos, the tests/ir goldens and tests/x64 to static ELF64
+#      executables (checked with readelf: no PT_INTERP, no dynamic
+#      section); the outputs equal the goldens / Klin builds. Kliner's
+#      own tools built by kliner-build give the same output as their
+#      Klin-built binaries, and kliner-build rebuilds itself to a fixpoint.
 #
 #   scripts/test.sh                 # klin from PATH, no Klin comparison
 #   KLIN=/path/to/klin KLIN_SRC=/path/to/klin-checkout scripts/test.sh
@@ -395,6 +401,126 @@ if build kliner-run tools/kliner-run -I "$ROOT/src"; then
         if [ $a = 0 ] && [ $b = 0 ] && cmp -s "$TMP/s1" "$TMP/s2"; then
             echo "ok   self: kliner-ir under kliner-run (IR of kliner-run, $(wc -l <"$TMP/s1" | tr -d ' ') lines)"; pass=$((pass + 1));
         else echo "FAIL self: kliner-ir under kliner-run"; fail=$((fail + 1)); fi
+    fi
+fi
+
+# --- stage 6: x86-64 backend ------------------------------------------
+# Native programs use the real runtime (rt/linux_x86_64), like kliner-run.
+if build kliner-build tools/kliner-build -I "$ROOT/src"; then
+    KB=$BIN
+    RI="-I $ROOT/rt/linux_x86_64 -I $ROOT/rt -I $ROOT/src"
+    NAT="$TMP/nat"
+    mkdir -p "$NAT"
+    printf 'usage: kliner-build [-I DIR]... FILE.kl -o OUT\n' >"$TMP/kbusage.err"
+    check build-usage 2 "$TMP/empty" "$TMP/kbusage.err" -- "$KB" "$ROOT/tests/rt/hello/main.kl"
+    nbuild() { # name file.kl: $NAT/name, or FAIL
+        if "$KB" $RI "$2" -o "$NAT/$1" >"$TMP/nb.err" 2>&1 && [ -x "$NAT/$1" ]; then return 0; fi
+        echo "FAIL native build $1"; sed 's/^/  /' "$TMP/nb.err"; fail=$((fail + 1)); return 1
+    }
+    static_elf() { # file: a static executable without libc / interpreter
+        readelf -h "$1" 2>/dev/null | grep -q 'EXEC (Executable file)' || return 1
+        readelf -l "$1" 2>/dev/null | grep -q 'INTERP' && return 1
+        readelf -d "$1" 2>&1 | grep -q 'There is no dynamic section' || return 1
+        return 0
+    }
+    if nbuild hello "$ROOT/tests/rt/hello/main.kl"; then
+        if command -v readelf >/dev/null 2>&1; then
+            if static_elf "$NAT/hello"; then echo "ok   native hello: static ELF64, no PT_INTERP / dynamic section"; pass=$((pass + 1));
+            else echo "FAIL native hello: not a static executable"; fail=$((fail + 1)); fi
+        else
+            echo "skip readelf checks (no readelf)"
+        fi
+        [ -f "$TMP/hello.out" ] && check native-hello 3 "$TMP/hello.out" "$TMP/hello.err" -- "$NAT/hello"
+    fi
+    [ -f "$TMP/alloc.out" ] && nbuild alloc "$ROOT/tests/rt/alloc/main.kl" && check native-alloc 0 "$TMP/alloc.out" "$TMP/empty" -- "$NAT/alloc"
+    [ -f "$TMP/args.out" ] && nbuild args "$ROOT/tests/rt/args/main.kl" && check native-args 0 "$TMP/args.out" "$TMP/empty" -- "$NAT/args" "a b" "" "zażółć" x
+    if [ -f "$TMP/cat.err" ] && nbuild cat "$ROOT/tests/rt/cat/main.kl"; then
+        check native-cat 0 "$TMP/in.txt" "$TMP/cat.err" -- "$NAT/cat" "$TMP/in.txt"
+        check native-cat-big 0 "$TMP/big.txt" "$TMP/big.err" -- "$NAT/cat" "$TMP/big.txt"
+        rm -f "$TMP/copy3"
+        check native-cat-write 0 "$TMP/empty" "$TMP/cat.err" -- "$NAT/cat" "$TMP/in.txt" "$TMP/copy3"
+        if cmp -s "$TMP/in.txt" "$TMP/copy3"; then echo "ok   native-cat-copy"; pass=$((pass + 1)); else echo "FAIL native-cat-copy"; fail=$((fail + 1)); fi
+        check native-cat-enoent 1 "$TMP/empty" "$TMP/enoent.err" -- "$NAT/cat" "$TMP/no/such/file"
+    fi
+    # tests/ir goldens (= Klin = kliner-run) and tests/x64 goldens (=
+    # kliner-run; Klin differs: K-B6), arguments x y
+    for d in "$ROOT"/tests/ir/*/ "$ROOT"/tests/x64/*/; do
+        n=$(basename "$d")
+        [ -f "$d/main.out" ] || continue
+        nbuild "t-$n" "$d/main.kl" || continue
+        "$NAT/t-$n" x y >"$TMP/nat.out" 2>&1 </dev/null; echo "exit $?" >>"$TMP/nat.out"
+        if cmp -s "$TMP/nat.out" "$d/main.out"; then echo "ok   native $n = golden"; pass=$((pass + 1));
+        else echo "FAIL native $n = golden"; diff "$d/main.out" "$TMP/nat.out" | head -20 | sed 's/^/  /'; fail=$((fail + 1)); fi
+        if [ -n "${RUN:-}" ]; then
+            "$RUN" $RI "$d/main.kl" x y >"$TMP/nrun.out" 2>&1 </dev/null; echo "exit $?" >>"$TMP/nrun.out"
+            if cmp -s "$TMP/nrun.out" "$d/main.out"; then echo "ok   kliner-run $n = golden"; pass=$((pass + 1));
+            else echo "FAIL kliner-run $n = golden"; fail=$((fail + 1)); fi
+        fi
+    done
+    # traps: exit 134 and a message on stderr, as under kliner-run
+    printf 'before\n' >"$TMP/trap.out"
+    printf '7:27: calling `sys.nope` (a function without a body) is not supported yet\n' >"$TMP/unsup.err"
+    if nbuild trap "$ROOT/tests/ir/only/trap/main.kl"; then
+        printf 'kliner: trap: division by zero\n' >"$TMP/ntrap.err"
+        check native-trap 134 "$TMP/trap.out" "$TMP/ntrap.err" -- "$NAT/trap"
+    fi
+    if nbuild deep "$ROOT/tests/ir/only/deep/main.kl"; then
+        printf 'kliner: trap: stack overflow\n' >"$TMP/ndeep.err"
+        check native-deep 134 "$TMP/empty" "$TMP/ndeep.err" -- "$NAT/deep"
+    fi
+    check native-unsup 1 "$TMP/empty" "$TMP/unsup.err" -- "$KB" -I "$ROOT/tests/ir/only/unsup/lib" -I "$ROOT/rt" "$ROOT/tests/ir/only/unsup/main.kl" -o "$NAT/unsup"
+    # Kliner's own tools built by kliner-build = their Klin-built binaries
+    nat_self() { # label native klin files...
+        label=$1 nb=$2 kb=$3; shift 3
+        bad=0 nf=0
+        for f in "$@"; do
+            nf=$((nf + 1))
+            "$kb" $NFL "$f" >"$TMP/s1" 2>&1; a=$?
+            "$nb" $NFL "$f" >"$TMP/s2" 2>&1; b=$?
+            if [ $a != $b ] || ! cmp -s "$TMP/s1" "$TMP/s2"; then bad=$((bad + 1)); echo "  differs: $f"; fi
+        done
+        if [ $bad = 0 ]; then echo "ok   native: $label ($nf files)"; pass=$((pass + 1));
+        else echo "FAIL native: $label ($bad of $nf files differ)"; fail=$((fail + 1)); fi
+    }
+    SRCS=$(find "$ROOT/src" "$ROOT/rt" "$ROOT/tools" "$ROOT/tests/rt" "$ROOT/tests/ir" "$ROOT/tests/x64" -name '*.kl' -not -path '*/out/*' | sort)
+    NFL=
+    [ -n "${LEX:-}" ] && nbuild lex "$ROOT/tools/kliner-lex/main.kl" && nat_self "kliner-lex = Klin build" "$NAT/lex" "$LEX" $SRCS "$ROOT"/tests/lex/*.kl
+    [ -n "${PARSE:-}" ] && nbuild parse "$ROOT/tools/kliner-parse/main.kl" && nat_self "kliner-parse = Klin build" "$NAT/parse" "$PARSE" $SRCS "$ROOT"/tests/parse/*.kl
+    if [ -n "${CHECK:-}" ] && nbuild check "$ROOT/tools/kliner-check/main.kl"; then
+        nat_self "kliner-check = Klin build (goldens)" "$NAT/check" "$CHECK" $(ls "$ROOT"/tests/check/*.kl "$ROOT"/tests/check/klin/*.kl "$ROOT"/tests/check/*/main.kl | grep -v lib_)
+        NFL="-I $ROOT/src -I $ROOT/rt -I $ROOT/rt/bootstrap"
+        nat_self "kliner-check = Klin build (programs)" "$NAT/check" "$CHECK" "$ROOT"/tools/*/main.kl "$ROOT"/tests/rt/*/main.kl
+        NFL=
+    fi
+    if [ -n "${IRD:-}" ] && nbuild ir "$ROOT/tools/kliner-ir/main.kl"; then
+        NFL=$RI
+        nat_self "kliner-ir = Klin build" "$NAT/ir" "$IRD" "$ROOT"/tools/*/main.kl "$ROOT"/tests/ir/*/main.kl "$ROOT"/tests/x64/*/main.kl
+        NFL=
+    fi
+    if [ -n "${RUN:-}" ] && nbuild run "$ROOT/tools/kliner-run/main.kl"; then
+        bad=0
+        for d in "$ROOT"/tests/ir/*/; do
+            [ -f "$d/main.out" ] || continue
+            "$NAT/run" $RI "$d/main.kl" x y >"$TMP/s1" 2>&1 </dev/null; echo "exit $?" >>"$TMP/s1"
+            cmp -s "$TMP/s1" "$d/main.out" || { bad=$((bad + 1)); echo "  differs: $d"; }
+        done
+        "$NAT/run" $RI "$ROOT/tools/kliner-lex/main.kl" "$ROOT/tests/rt/hello/main.kl" >"$TMP/s1" 2>&1
+        "$LEX" "$ROOT/tests/rt/hello/main.kl" >"$TMP/s2" 2>&1
+        cmp -s "$TMP/s1" "$TMP/s2" || { bad=$((bad + 1)); echo "  differs: kliner-lex under native kliner-run"; }
+        if [ $bad = 0 ]; then echo "ok   native: kliner-run (tests/ir goldens, kliner-lex under it)"; pass=$((pass + 1));
+        else echo "FAIL native: kliner-run ($bad differ)"; fail=$((fail + 1)); fi
+    fi
+    # self-compilation: native kliner-build = Klin-built kliner-build, then a fixpoint
+    if nbuild build1 "$ROOT/tools/kliner-build/main.kl"; then
+        "$NAT/build1" $RI "$ROOT/tools/kliner-build/main.kl" -o "$NAT/build2" >"$TMP/nb.err" 2>&1
+        "$NAT/build2" $RI "$ROOT/tools/kliner-build/main.kl" -o "$NAT/build3" >>"$TMP/nb.err" 2>&1
+        if cmp -s "$NAT/build1" "$NAT/build2" && cmp -s "$NAT/build2" "$NAT/build3"; then
+            echo "ok   native: kliner-build rebuilds itself byte for byte ($(wc -c <"$NAT/build1" | tr -d ' ') bytes)"; pass=$((pass + 1));
+        else echo "FAIL native: kliner-build self-compilation differs"; sed 's/^/  /' "$TMP/nb.err"; fail=$((fail + 1)); fi
+        if command -v readelf >/dev/null 2>&1; then
+            if static_elf "$NAT/build1"; then echo "ok   native kliner-build: static ELF64"; pass=$((pass + 1));
+            else echo "FAIL native kliner-build: not static"; fail=$((fail + 1)); fi
+        fi
     fi
 fi
 

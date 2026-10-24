@@ -826,3 +826,29 @@ Stage 5 ([05-ir.md](05-ir.md)) needed these choices. Marek approved
 8. *(PROPOSED)* **`argv[0]` under `kliner-run` is the `.kl` path** (the program
    sees `prog.kl a b` where the native binary sees `./prog a b`), and
    the interpreter caps the call depth at 10 000 (traps beyond).
+
+## C14. Stage 6: x86-64 backend — PROPOSED
+
+Stage 6 ([06-x86-64.md](06-x86-64.md)) needed these choices; all are
+**PROPOSED**:
+
+1. *(PROPOSED)* **Own calling convention**, not SysV: all arguments on
+   the stack (`[rsp + 8j]` at the call), result in `rax`; no callee-saved
+   registers besides `rbp`. SysV comes with C interop (stage 10).
+2. *(PROPOSED)* **`_start` maps a 1 GiB `MAP_NORESERVE` stack** with a
+   1 MiB guard and a `SIGSEGV` handler on an alternate stack, so a stack
+   overflow is a trap (`kliner: trap: stack overflow`, exit 134) instead
+   of a bare `SIGSEGV`; fallback to the kernel's stack if the `mmap`
+   fails.
+3. *(PROPOSED)* **Traps**: `kliner: trap: MESSAGE` on stderr, exit 134
+   (as `kliner-run`, C13.6). Integer `MIN / −1` wraps (no trap).
+4. *(PROPOSED)* **Only reachable functions** (from `main`, `$init`) are
+   emitted.
+5. *(PROPOSED)* **Static `ET_EXEC` at `0x400000`**, data at
+   `0x10000000`, with `.symtab` (no debug info, no PIE).
+6. *(PROPOSED)* **Tool name `kliner-build FILE.kl -o OUT`** (a single
+   `kliner` driver later); backend goldens in `tests/x64` whose
+   reference is `kliner-run` (not Klin) where Klin's C differs (K-B6).
+7. *(PROPOSED)* **No register allocator, no folding in stage 6**: every
+   IR value lives in a frame slot; linear scan, constant folding,
+   immediates and fused compare + branch move to stage 7.

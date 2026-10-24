@@ -1,0 +1,165 @@
+// Backend golden (stage 6; main.out written by kliner-run): the C13 integer rules at the edges, with the
+// operands in variables (nothing folded): wrapping to the type's width,
+// shift counts >= the width (0, or -1 for a negative signed value),
+// unsigned comparisons, division by -1, narrowing / widening casts.
+module main
+import os
+import out
+
+fn p(o: *mut out.Out, name: []u8, v: i64) {
+    (*o).lit(name)
+    (*o).lit(b" ")
+    (*o).dec(v)
+    (*o).nl()
+}
+
+fn shl8(a: u8, n: u8): u8 {
+    return a << n
+}
+
+fn shr8(a: i8, n: i8): i8 {
+    return a >> n
+}
+
+fn shl32(a: i32, n: i32): i32 {
+    return a << n
+}
+
+fn shr32(a: i32, n: i32): i32 {
+    return a >> n
+}
+
+fn ushr32(a: u32, n: u32): u32 {
+    return a >> n
+}
+
+fn shl64(a: i64, n: i64): i64 {
+    return a << n
+}
+
+fn shr64(a: i64, n: i64): i64 {
+    return a >> n
+}
+
+fn ushr64(a: u64, n: u64): u64 {
+    return a >> n
+}
+
+fn shifts(o: *mut out.Out) {
+    p(o, b"u8 1<<7", cast(i64, shl8(1, 7)))
+    p(o, b"u8 1<<8", cast(i64, shl8(1, 8)))
+    p(o, b"u8 3<<200", cast(i64, shl8(3, 200)))
+    p(o, b"i8 -128>>7", cast(i64, shr8(-128, 7)))
+    p(o, b"i8 -1>>8", cast(i64, shr8(-1, 8)))
+    p(o, b"i8 64>>9", cast(i64, shr8(64, 9)))
+    p(o, b"i32 1<<31", cast(i64, shl32(1, 31)))
+    p(o, b"i32 1<<32", cast(i64, shl32(1, 32)))
+    p(o, b"i32 5<<-1", cast(i64, shl32(5, -1)))
+    p(o, b"i32 -5>>32", cast(i64, shr32(-5, 32)))
+    p(o, b"i32 -5>>-1", cast(i64, shr32(-5, -1)))
+    p(o, b"i32 5>>40", cast(i64, shr32(5, 40)))
+    p(o, b"u32 max>>31", cast(i64, ushr32(4294967295, 31)))
+    p(o, b"u32 max>>32", cast(i64, ushr32(4294967295, 32)))
+    p(o, b"i64 1<<63", shl64(1, 63))
+    p(o, b"i64 1<<64", shl64(1, 64))
+    p(o, b"i64 -1>>64", shr64(-1, 64))
+    p(o, b"i64 -9>>2", shr64(-9, 2))
+    p(o, b"u64 max>>64", cast(i64, ushr64(18446744073709551615, 64)))
+    p(o, b"u64 max>>60", cast(i64, ushr64(18446744073709551615, 60)))
+}
+
+fn mul8(a: i8, b: i8): i8 {
+    return a * b
+}
+
+fn mulu16(a: u16, b: u16): u16 {
+    return a * b
+}
+
+fn neg32(a: i32): i32 {
+    return -a
+}
+
+fn not8(a: u8): u8 {
+    return ~a
+}
+
+fn wrap(o: *mut out.Out) {
+    p(o, b"i8 100*3", cast(i64, mul8(100, 3)))
+    p(o, b"i8 -128*-1", cast(i64, mul8(-128, -1)))
+    p(o, b"u16 300*300", cast(i64, mulu16(300, 300)))
+    p(o, b"i32 -min", cast(i64, neg32(-2147483647 - 1)))
+    p(o, b"u8 ~5", cast(i64, not8(5)))
+}
+
+fn div32(a: i32, b: i32): i32 {
+    return a / b
+}
+
+fn rem32(a: i32, b: i32): i32 {
+    return a % b
+}
+
+fn divu8(a: u8, b: u8): u8 {
+    return a / b
+}
+
+fn division(o: *mut out.Out) {
+    p(o, b"i32 7/-1", cast(i64, div32(7, -1)))
+    p(o, b"i32 7%-1", cast(i64, rem32(7, -1)))
+    p(o, b"i32 -7/3", cast(i64, div32(-7, 3)))
+    p(o, b"i32 -7%3", cast(i64, rem32(-7, 3)))
+    p(o, b"i32 7%-3", cast(i64, rem32(7, -3)))
+    p(o, b"u8 255/2", cast(i64, divu8(255, 2)))
+}
+
+fn ltu(a: u32, b: u32): bool {
+    return a < b
+}
+
+fn lt(a: i32, b: i32): bool {
+    return a < b
+}
+
+fn ltu64(a: u64, b: u64): bool {
+    return a < b
+}
+
+fn bit(b: bool): i64 {
+    if b {
+        return 1
+    }
+    return 0
+}
+
+fn compares(o: *mut out.Out) {
+    p(o, b"u32 1<max", bit(ltu(1, 4294967295)))
+    p(o, b"i32 1<-1", bit(lt(1, -1)))
+    p(o, b"u64 1<max", bit(ltu64(1, 18446744073709551615)))
+    p(o, b"u64 max<1", bit(ltu64(18446744073709551615, 1)))
+}
+
+fn casts(o: *mut out.Out) {
+    let big: i64 = 0x1234567890
+    p(o, b"i64->u8", cast(i64, cast(u8, big)))
+    p(o, b"i64->i8", cast(i64, cast(i8, big + 0x70)))
+    p(o, b"i64->i16", cast(i64, cast(i16, big)))
+    p(o, b"i64->u32", cast(i64, cast(u32, big)))
+    p(o, b"i64->i32", cast(i64, cast(i32, big)))
+    let m: i32 = -1
+    p(o, b"i32->u64", cast(i64, cast(u64, m) >> 32))
+    p(o, b"i32->u32", cast(i64, cast(u32, m)))
+    let s: i8 = -2
+    p(o, b"i8->u16", cast(i64, cast(u16, s)))
+}
+
+fn main() {
+    let mut o = out.Out.stdout()
+    shifts(&o)
+    wrap(&o)
+    division(&o)
+    compares(&o)
+    casts(&o)
+    o.flush_quiet()
+    os.exit(0)
+}

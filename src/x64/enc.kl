@@ -1,0 +1,423 @@
+// module x64 — the x86-64 backend (stage 6, docs/06-x86-64.md).
+// enc.kl: the code buffer, fixups and the instruction encoder. Only the
+// forms the code generator needs: 64-bit moves between registers and
+// [base + disp] memory, ALU ops on rax / rcx, the narrow loads, stores
+// and extensions, jumps / calls with rel32 fixups, syscall.
+module x64
+import arena
+import ir
+
+pub const RAX: i32 = 0
+pub const RCX: i32 = 1
+pub const RDX: i32 = 2
+pub const RBX: i32 = 3
+pub const RSP: i32 = 4
+pub const RBP: i32 = 5
+pub const RSI: i32 = 6
+pub const RDI: i32 = 7
+pub const R8: i32 = 8
+pub const R9: i32 = 9
+pub const R10: i32 = 10
+pub const R11: i32 = 11
+pub const R12: i32 = 12
+
+// condition codes (the low nibble of Jcc / SETcc)
+pub const CC_B: i32 = 2
+pub const CC_AE: i32 = 3
+pub const CC_E: i32 = 4
+pub const CC_NE: i32 = 5
+pub const CC_BE: i32 = 6
+pub const CC_A: i32 = 7
+pub const CC_S: i32 = 8
+pub const CC_L: i32 = 12
+pub const CC_GE: i32 = 13
+pub const CC_LE: i32 = 14
+pub const CC_G: i32 = 15
+
+// fixup kinds: a rel32 field whose target is known only later
+pub const FX_LAB: i32 = 0 // tgt = global label index (Prog.labs)
+pub const FX_FN: i32 = 1 // tgt = function index
+pub const FX_DATA: i32 = 2 // tgt = offset in the string data
+pub const FX_BSS: i32 = 3 // tgt = offset in the globals
+pub const FX_HELP: i32 = 4 // tgt = helper (H_*)
+
+// helpers emitted once after the functions
+pub const H_MEMMOVE: i32 = 0
+pub const H_TRAP1: i32 = 1 // division by zero
+pub const H_TRAP2: i32 = 2 // end of a function without `return`
+pub const H_TRAP3: i32 = 3 // null fn value
+pub const H_TRAP4: i32 = 4 // stack overflow (SIGSEGV in the guard)
+pub const H_TRAP5: i32 = 5 // any other SIGSEGV
+pub const H_SEGV: i32 = 6 // the SIGSEGV handler
+pub const H_START: i32 = 7
+pub const NHELP: i32 = 8
+pub const NTRAP: i32 = 6
+
+pub const E_X64: i32 = 1006
+
+pub struct Fix {
+    pos: i32
+    kind: i32
+    tgt: i64
+}
+
+pub struct Cg {
+    a: *mut arena.Arena
+    g: *mut ir.Prog
+    b: []u8 // machine code
+    n: i32
+    fix: []Fix
+    nf: i32
+    lpos: []i32 // global label index -> code offset
+    fpos: []i32 // function -> code offset (-1: no code)
+    fend: []i32
+    hpos: []i32 // helper -> code offset
+    hend: []i32
+    tmsg: []i64 // trap messages: data offsets
+    tlen: []i32
+    fi: i32 // function being generated
+    msg: []u8
+    mn: i32
+}
+
+fn alloc_fix(a: *mut arena.Arena, n: i32): ![]Fix {
+    let two: [2]Fix
+    let size = cast(i64, &two[1]) - cast(i64, &two[0])
+    let p = cast(*mut [arena.MAX_LEN]Fix, arena.alloc_addr(a, size * cast(i64, n))!)
+    return (*p)[:n]
+}
+
+pub fn Cg.new(a: *mut arena.Arena, g: *mut ir.Prog): !Cg {
+    let mut c: Cg
+    c.a = a
+    c.g = g
+    c.b = arena.alloc_u8(a, 1 << 16)!
+    c.fix = alloc_fix(a, 1024)!
+    c.lpos = arena.alloc_i32(a, (*g).labs.len + 1)!
+    c.fpos = arena.alloc_i32(a, (*g).nfn + 1)!
+    c.fend = arena.alloc_i32(a, (*g).nfn + 1)!
+    c.hpos = arena.alloc_i32(a, NHELP)!
+    c.hend = arena.alloc_i32(a, NHELP)!
+    c.tmsg = arena.alloc_i64(a, NTRAP)!
+    c.tlen = arena.alloc_i32(a, NTRAP)!
+    c.msg = arena.alloc_u8(a, 512)!
+    for i in 0..<(*g).nfn + 1 {
+        c.fpos[i] = -1
+    }
+    return c
+}
+
+pub fn madd(c: *mut Cg, s: []u8) {
+    for i in 0..<s.len {
+        if (*c).mn < (*c).msg.len {
+            (*c).msg[(*c).mn] = s[i]
+            (*c).mn += 1
+        }
+    }
+}
+
+pub fn message(c: *mut Cg): []u8 {
+    return (*c).msg[0:(*c).mn]
+}
+
+// At least k free bytes in the code buffer and 32 free fixups.
+pub fn room(c: *mut Cg, k: i32): !i32 {
+    if (*c).n + k > (*c).b.len {
+        let mut m = (*c).b.len * 2
+        while (*c).n + k > m {
+            m = m * 2
+        }
+        let mut bigger = arena.alloc_u8((*c).a, m)!
+        for i in 0..<(*c).n {
+            bigger[i] = (*c).b[i]
+        }
+        (*c).b = bigger
+    }
+    if (*c).nf + 32 > (*c).fix.len {
+        let mut more = alloc_fix((*c).a, (*c).fix.len * 2)!
+        for i in 0..<(*c).nf {
+            more[i] = (*c).fix[i]
+        }
+        (*c).fix = more
+    }
+    return 0
+}
+
+// ---- bytes ----
+
+pub fn b1(c: *mut Cg, v: i64) {
+    (*c).b[(*c).n] = cast(u8, v & 0xff)
+    (*c).n += 1
+}
+
+pub fn b4(c: *mut Cg, v: i64) {
+    b1(c, v)
+    b1(c, v >> 8)
+    b1(c, v >> 16)
+    b1(c, v >> 24)
+}
+
+pub fn b8(c: *mut Cg, v: i64) {
+    b4(c, v)
+    b4(c, v >> 32)
+}
+
+pub fn put32(c: *mut Cg, at: i32, v: i64) {
+    (*c).b[at] = cast(u8, v & 0xff)
+    (*c).b[at + 1] = cast(u8, (v >> 8) & 0xff)
+    (*c).b[at + 2] = cast(u8, (v >> 16) & 0xff)
+    (*c).b[at + 3] = cast(u8, (v >> 24) & 0xff)
+}
+
+pub fn fits32(v: i64): bool {
+    return v >= -2147483648 && v <= 2147483647
+}
+
+pub fn fits8(v: i64): bool {
+    return v >= -128 && v <= 127
+}
+
+// ---- encoding ----
+
+// REX prefix when needed: W (64-bit operand), R (reg >= 8), B (rm / base >= 8).
+fn rex(c: *mut Cg, w: bool, reg: i32, rm: i32) {
+    let mut x = 0x40
+    if w {
+        x = x | 8
+    }
+    if reg >= 8 {
+        x = x | 4
+    }
+    if rm >= 8 {
+        x = x | 1
+    }
+    if x != 0x40 {
+        b1(c, cast(i64, x))
+    }
+}
+
+fn opcode(c: *mut Cg, op: i32) {
+    if op > 0xff {
+        b1(c, cast(i64, op >> 8))
+    }
+    b1(c, cast(i64, op & 0xff))
+}
+
+// ModRM (+ SIB) for [base + disp].
+fn modrm_mem(c: *mut Cg, reg: i32, base: i32, disp: i64) {
+    let r = (reg & 7) << 3
+    let bs = base & 7
+    if disp == 0 && bs != 5 {
+        b1(c, cast(i64, r | bs))
+        if bs == 4 {
+            b1(c, 0x24)
+        }
+    } else if fits8(disp) {
+        b1(c, cast(i64, 0x40 | r | bs))
+        if bs == 4 {
+            b1(c, 0x24)
+        }
+        b1(c, disp)
+    } else {
+        b1(c, cast(i64, 0x80 | r | bs))
+        if bs == 4 {
+            b1(c, 0x24)
+        }
+        b4(c, disp)
+    }
+}
+
+// op reg, [base + disp] (or the reverse direction, by opcode). pre: 0 or 0x66.
+pub fn mem_op(c: *mut Cg, pre: i32, w: bool, op: i32, reg: i32, base: i32, disp: i64) {
+    if pre != 0 {
+        b1(c, cast(i64, pre))
+    }
+    rex(c, w, reg, base)
+    opcode(c, op)
+    modrm_mem(c, reg, base, disp)
+}
+
+// op reg, rm (register form, ModRM mod = 11).
+pub fn rr_op(c: *mut Cg, w: bool, op: i32, reg: i32, rm: i32) {
+    rex(c, w, reg, rm)
+    opcode(c, op)
+    b1(c, cast(i64, 0xc0 | ((reg & 7) << 3) | (rm & 7)))
+}
+
+// mov reg, imm (sign-extended imm32 or movabs).
+pub fn mov_imm(c: *mut Cg, reg: i32, v: i64) {
+    if v >= 0 && v <= 0xffffffff {
+        // mov r32, imm32 zero-extends
+        rex(c, false, 0, reg)
+        b1(c, cast(i64, 0xb8 + (reg & 7)))
+        b4(c, v)
+    } else if fits32(v) {
+        rex(c, true, 0, reg)
+        b1(c, 0xc7)
+        b1(c, cast(i64, 0xc0 | (reg & 7)))
+        b4(c, v)
+    } else {
+        rex(c, true, 0, reg)
+        b1(c, cast(i64, 0xb8 + (reg & 7)))
+        b8(c, v)
+    }
+}
+
+// rsp += v / rsp -= v
+pub fn add_rsp(c: *mut Cg, v: i64) {
+    if v > 0 {
+        rr_op(c, true, 0x81, 0, RSP)
+        b4(c, v)
+    } else if v < 0 {
+        rr_op(c, true, 0x81, 5, RSP)
+        b4(c, -v)
+    }
+}
+
+pub fn fixup(c: *mut Cg, kind: i32, tgt: i64) {
+    let mut f: Fix
+    f.pos = (*c).n
+    f.kind = kind
+    f.tgt = tgt
+    (*c).fix[(*c).nf] = f
+    (*c).nf += 1
+    b4(c, 0)
+}
+
+pub fn jmp_lab(c: *mut Cg, l: i32) {
+    b1(c, 0xe9)
+    fixup(c, FX_LAB, cast(i64, l))
+}
+
+pub fn jcc_lab(c: *mut Cg, cc: i32, l: i32) {
+    b1(c, 0x0f)
+    b1(c, cast(i64, 0x80 | cc))
+    fixup(c, FX_LAB, cast(i64, l))
+}
+
+pub fn jcc_help(c: *mut Cg, cc: i32, h: i32) {
+    b1(c, 0x0f)
+    b1(c, cast(i64, 0x80 | cc))
+    fixup(c, FX_HELP, cast(i64, h))
+}
+
+pub fn jmp_help(c: *mut Cg, h: i32) {
+    b1(c, 0xe9)
+    fixup(c, FX_HELP, cast(i64, h))
+}
+
+pub fn call_fn(c: *mut Cg, fi: i32) {
+    b1(c, 0xe8)
+    fixup(c, FX_FN, cast(i64, fi))
+}
+
+pub fn call_help(c: *mut Cg, h: i32) {
+    b1(c, 0xe8)
+    fixup(c, FX_HELP, cast(i64, h))
+}
+
+// lea reg, [rip + target]
+pub fn lea_rip(c: *mut Cg, reg: i32, kind: i32, tgt: i64) {
+    rex(c, true, reg, 0)
+    b1(c, 0x8d)
+    b1(c, cast(i64, ((reg & 7) << 3) | 5))
+    fixup(c, kind, tgt)
+}
+
+// Short forward jumps inside one IR instruction: the rel8 byte is patched.
+pub fn jcc8(c: *mut Cg, cc: i32): i32 {
+    b1(c, cast(i64, 0x70 | cc))
+    b1(c, 0)
+    return (*c).n - 1
+}
+
+pub fn jmp8(c: *mut Cg): i32 {
+    b1(c, 0xeb)
+    b1(c, 0)
+    return (*c).n - 1
+}
+
+pub fn jcc32(c: *mut Cg, cc: i32): i32 {
+    b1(c, 0x0f)
+    b1(c, cast(i64, 0x80 | cc))
+    b4(c, 0)
+    return (*c).n - 4
+}
+
+pub fn here32(c: *mut Cg, at: i32) {
+    put32(c, at, cast(i64, (*c).n - at - 4))
+}
+
+// (rel8 targets: at most 127 bytes ahead; only used inside one IR op)
+pub fn here8(c: *mut Cg, at: i32) {
+    (*c).b[at] = cast(u8, ((*c).n - at - 1) & 0xff)
+}
+
+pub fn syscall(c: *mut Cg) {
+    b1(c, 0x0f)
+    b1(c, 0x05)
+}
+
+// ---- IR registers live in frame slots: [rbp - 8 (r + 1)] ----
+
+pub fn rdisp(r: i32): i64 {
+    return -8 * (cast(i64, r) + 1)
+}
+
+pub fn ldr(c: *mut Cg, reg: i32, r: i32) {
+    mem_op(c, 0, true, 0x8b, reg, RBP, rdisp(r))
+}
+
+pub fn stv(c: *mut Cg, r: i32, reg: i32) {
+    mem_op(c, 0, true, 0x89, reg, RBP, rdisp(r))
+}
+
+// rax normalized to IR type t (sign- / zero-extension of the low bits).
+pub fn norm(c: *mut Cg, t: u8) {
+    if t == ir.I8 {
+        rr_op(c, true, 0x0fbe, RAX, RAX)
+    } else if t == ir.I16 {
+        rr_op(c, true, 0x0fbf, RAX, RAX)
+    } else if t == ir.I32 {
+        rr_op(c, true, 0x63, RAX, RAX)
+    } else if t == ir.U8 {
+        rr_op(c, false, 0x0fb6, RAX, RAX)
+    } else if t == ir.U16 {
+        rr_op(c, false, 0x0fb7, RAX, RAX)
+    } else if t == ir.U32 {
+        rr_op(c, false, 0x89, RAX, RAX)
+    }
+}
+
+// rax = *(t *)(base + disp), normalized
+pub fn load_t(c: *mut Cg, t: u8, base: i32, disp: i64) {
+    if t == ir.I8 {
+        mem_op(c, 0, true, 0x0fbe, RAX, base, disp)
+    } else if t == ir.I16 {
+        mem_op(c, 0, true, 0x0fbf, RAX, base, disp)
+    } else if t == ir.I32 {
+        mem_op(c, 0, true, 0x63, RAX, base, disp)
+    } else if t == ir.U8 {
+        mem_op(c, 0, false, 0x0fb6, RAX, base, disp)
+    } else if t == ir.U16 {
+        mem_op(c, 0, false, 0x0fb7, RAX, base, disp)
+    } else if t == ir.U32 {
+        mem_op(c, 0, false, 0x8b, RAX, base, disp)
+    } else {
+        mem_op(c, 0, true, 0x8b, RAX, base, disp)
+    }
+}
+
+// *(t *)(base + disp) = rcx
+pub fn store_t(c: *mut Cg, t: u8, base: i32, disp: i64) {
+    let s = ir.tsize(t)
+    if s == 1 {
+        mem_op(c, 0, false, 0x88, RCX, base, disp)
+    } else if s == 2 {
+        mem_op(c, 0x66, false, 0x89, RCX, base, disp)
+    } else if s == 4 {
+        mem_op(c, 0, false, 0x89, RCX, base, disp)
+    } else {
+        mem_op(c, 0, true, 0x89, RCX, base, disp)
+    }
+}
