@@ -12,7 +12,7 @@ can be compared byte for byte.
 
 - **Loader** `src/load.kl` — port of `loadProject` (`lib/project.dart`):
   the entry file, its same-module siblings, imported packages (search
-  roots `-I DIR`, the entry's directory, `KLIN_STDLIB`), the same file
+  roots `-I DIR`, `KLIN_PATH`, `KLIN_STDLIB`, as in Klin), the same file
   and declaration order and the same load errors (missing module,
   module name mismatch, import cycle, …). Remote imports are an error.
 - **Declarations** `decl.kl` — collects structs, enums, consts,
