@@ -80,7 +80,7 @@ and probed OK.
 | Byte-string literal | `b"fn"` of type `[]u8` | low | Merged in #351 (G5, D10). Keyword table, messages, paths: `b"fn"`, `b"error: "`. Rules: `.len` counts bytes, no implicit trailing NUL (`b"/proc/self/cmdline\0"` has len 19); escapes `\n \t \\ \" \$ \0`; `\0` is one NUL byte, not octal (`b"\00"` = NUL + `'0'`); no interpolation. Bytes are read-only (C8.1): a direct write, a write through an immutable binding and a write through a `[]u8` param are checker errors; a write through a mutable place (`let mut s = b"fn"; s[0] = 1`) compiles and crashes (UB). Type-level check: #357 (in progress) |
 | Module-level `const` | `const PAGE: i64 = 4096` | low | Merged in #351, extended in #352–#353 (G8, D11). `pub? const Name: Type = expr`, top level only. Types: integer prims, `bool`, `[]u8`. An integer initializer is an integer constant expression (literals, unary `-` / `~`, `+ - * / % << >> & \| ^`, other constants, `mod.NAME`); overflow is an error, not a wrap. Valid as an `[N]T` length (`[BUF]u8`). Imported as `mod.NAME` (`os.AT_FDCWD`). Immutable: `NAME = …` and `KW[0] = …` are errors; a local shadows a const |
 | Module-level `let` / `let mut` | `let mut hits: i32`, `pub let mut n: i32 = 1` | low | Merged in #356 (D11). Type required; the initializer is a constant expression or omitted (zeroed); private = `static` in C; another module writes only a `pub let mut`. **Not used by the compiler source** while C7.3 stands — option in C9.1 (PROPOSED) |
-| Strings for the compiler | `[]u8` + `i32` offsets | low | All source text, identifiers and output buffers are `[]u8`; literals are `b"…"`. `str` is not used in compiler code |
+| Strings for the compiler | `[]u8`, subslices, `i32` offsets in tables | low | All source text, identifiers and output buffers are `[]u8`; literals are `b"…"`; a token's text is `src[start:start + len]` (G6). `str` is not used in compiler code |
 
 ### Data model — PROPOSED
 
@@ -417,7 +417,7 @@ pub fn Arena.new(cap: i64): !Arena           // one mmap(PROT_READ|PROT_WRITE, M
 pub fn alloc_u8(a: *mut Arena, n: i32): ![]u8     // 8-byte aligned, zeroed; ENOMEM (12) when full
 pub fn alloc_i32(a: *mut Arena, n: i32): ![]i32
 pub fn alloc_i64(a: *mut Arena, n: i32): ![]i64
-pub fn alloc_tok(a: *mut Arena, n: i32): ![]Token  // one per table type: no generics in the core
+// pub fn alloc_tok(a: *mut Arena, n: i32): ![]Token — one per table type, declared next to that type
 pub fn mark(a: *mut Arena): i64
 pub fn reset(a: *mut Arena, m: i64)          // zeroes [m, used), then used = m (DECIDED, C8.4)
 pub fn free_all(a: *mut Arena)               // munmap
