@@ -1,0 +1,253 @@
+// elf.kl: the static ELF64 executable, for every target — no
+// interpreter, no dynamic section, no libc, no external linker
+// (docs/06-x86-64.md, docs/07-rv64.md). Layout:
+//   file 0: ELF header, 3 program headers, then the code (.text);
+//   PT_LOAD R+X  vaddr 0x400000 covering the header and the code;
+//   PT_LOAD R+W  vaddr 0x10000000 + file offset: .data (string
+//                literals), then .bss (the globals, zero-filled);
+//   PT_GNU_STACK RW (non-executable stack);
+//   then .symtab / .strtab / .shstrtab and the section headers, for
+//   readelf / objdump / gdb (not loaded).
+// The backends resolve their own data / globals references first, with
+// code_va / data_va / bss_va (they depend only on the code size).
+module back
+import arena
+import ir
+
+pub const TEXT_VA: i64 = 0x400000
+pub const DATA_VA: i64 = 0x10000000
+const HDR: i64 = 64 + 3 * 56
+
+pub const EM_X86_64: i64 = 62
+pub const EM_RISCV: i64 = 243
+
+pub const E_BIG: i32 = 1008 // the image would be too large
+
+// A function symbol: [off, off + size) in the code.
+pub struct Sym {
+    name: []u8
+    off: i64
+    size: i64
+}
+
+pub fn alloc_syms(a: *mut arena.Arena, n: i32): ![]Sym {
+    let two: [2]Sym
+    let size = cast(i64, &two[1]) - cast(i64, &two[0])
+    let p = cast(*mut [arena.MAX_LEN]Sym, arena.alloc_addr(a, size * cast(i64, n))!)
+    return (*p)[:n]
+}
+
+// The address of code offset off.
+pub fn code_va(off: i64): i64 {
+    return TEXT_VA + HDR + off
+}
+
+fn data_off(code: i64): i64 {
+    return (HDR + code + 15) / 16 * 16
+}
+
+fn dsize(nd: i64): i64 {
+    return (nd + 15) / 16 * 16
+}
+
+// The address of the string data / the globals for code size `code`.
+pub fn data_va(code: i64): i64 {
+    return DATA_VA + data_off(code)
+}
+
+pub fn bss_va(code: i64, nd: i64): i64 {
+    return data_va(code) + dsize(nd)
+}
+
+struct Buf {
+    b: []u8
+    n: i32
+}
+
+fn w1(o: *mut Buf, v: i64) {
+    (*o).b[(*o).n] = cast(u8, v & 0xff)
+    (*o).n += 1
+}
+
+fn w2(o: *mut Buf, v: i64) {
+    w1(o, v)
+    w1(o, v >> 8)
+}
+
+fn w4(o: *mut Buf, v: i64) {
+    w2(o, v)
+    w2(o, v >> 16)
+}
+
+fn w8(o: *mut Buf, v: i64) {
+    w4(o, v)
+    w4(o, v >> 32)
+}
+
+fn wbytes(o: *mut Buf, s: []u8) {
+    for i in 0..<s.len {
+        w1(o, cast(i64, s[i]))
+    }
+}
+
+fn pad(o: *mut Buf, al: i32) {
+    while (*o).n % al != 0 {
+        w1(o, 0)
+    }
+}
+
+fn phdr(o: *mut Buf, typ: i64, flags: i64, off: i64, va: i64, fsz: i64, msz: i64, al: i64) {
+    w4(o, typ)
+    w4(o, flags)
+    w8(o, off)
+    w8(o, va)
+    w8(o, va)
+    w8(o, fsz)
+    w8(o, msz)
+    w8(o, al)
+}
+
+fn shdr(o: *mut Buf, name: i64, typ: i64, flags: i64, va: i64, off: i64, size: i64, link: i64, info: i64, al: i64, es: i64) {
+    w4(o, name)
+    w4(o, typ)
+    w8(o, flags)
+    w8(o, va)
+    w8(o, off)
+    w8(o, size)
+    w4(o, link)
+    w4(o, info)
+    w8(o, al)
+    w8(o, es)
+}
+
+fn sym(o: *mut Buf, name: i64, info: i64, shndx: i64, value: i64, size: i64) {
+    w4(o, name)
+    w1(o, info)
+    w1(o, 0)
+    w2(o, shndx)
+    w8(o, value)
+    w8(o, size)
+}
+
+fn strz(o: *mut Buf, s: []u8): i64 {
+    let at = cast(i64, (*o).n)
+    wbytes(o, s)
+    w1(o, 0)
+    return at
+}
+
+const SHSTR: []u8 = b"\0.text\0.data\0.bss\0.symtab\0.strtab\0.shstrtab\0"
+
+// The executable: code (all references resolved), string data, gsize
+// bytes of globals, syms[0 .. nsym): local functions, the last one
+// global — the entry point (_start).
+pub fn image(a: *mut arena.Arena, machine: i64, eflags: i64, code: []u8, data: []u8, gsize: i64, syms: []Sym, nsym: i32): ![]u8 {
+    let ncode = cast(i64, code.len)
+    let doff = data_off(ncode)
+    let nd = cast(i64, data.len)
+    let ds = dsize(nd)
+    let dva = DATA_VA + doff
+    let bva = dva + ds
+    let mut strsize: i64 = 1
+    for i in 0..<nsym {
+        strsize += cast(i64, syms[i].name.len) + 1
+    }
+    let nall = nsym + 1
+    let total = doff + ds + strsize + cast(i64, nall) * 24 + cast(i64, SHSTR.len) + 7 * 64 + 64
+    if total > 0x7fff0000 {
+        return error(E_BIG)
+    }
+    let mut o: Buf
+    o.b = arena.alloc_u8(a, cast(i32, total))!
+    o.n = 0
+    let mut st: Buf
+    st.b = arena.alloc_u8(a, cast(i32, strsize))!
+    st.n = 0
+    w1(&st, 0)
+    let mut sy: Buf
+    sy.b = arena.alloc_u8(a, nall * 24)!
+    sy.n = 0
+    sym(&sy, 0, 0, 0, 0, 0)
+    for i in 0..<nsym {
+        let nm = strz(&st, syms[i].name)
+        let mut info = 0x02 // LOCAL FUNC
+        if i == nsym - 1 {
+            info = 0x12 // GLOBAL FUNC
+        }
+        sym(&sy, nm, cast(i64, info), 1, code_va(syms[i].off), syms[i].size)
+    }
+    let entry = code_va(syms[nsym - 1].off)
+    let soff = doff + ds
+    let stroff = soff + cast(i64, nall) * 24
+    let shoff_str = stroff + cast(i64, st.n)
+    let shoff = (shoff_str + cast(i64, SHSTR.len) + 7) / 8 * 8
+    // ELF header
+    w1(&o, 0x7f)
+    wbytes(&o, b"ELF")
+    w1(&o, 2) // 64-bit
+    w1(&o, 1) // little endian
+    w1(&o, 1) // version
+    w1(&o, 0) // System V ABI
+    w8(&o, 0)
+    w2(&o, 2) // ET_EXEC
+    w2(&o, machine)
+    w4(&o, 1)
+    w8(&o, entry)
+    w8(&o, 64) // phoff
+    w8(&o, shoff)
+    w4(&o, eflags)
+    w2(&o, 64) // ehsize
+    w2(&o, 56) // phentsize
+    w2(&o, 3) // phnum
+    w2(&o, 64) // shentsize
+    w2(&o, 7) // shnum
+    w2(&o, 6) // shstrndx
+    phdr(&o, 1, 5, 0, TEXT_VA, HDR + ncode, HDR + ncode, 0x1000) // PT_LOAD R X
+    phdr(&o, 1, 6, doff, dva, nd, ds + gsize, 0x1000) // PT_LOAD R W
+    phdr(&o, 0x6474e551, 6, 0, 0, 0, 0, 16) // PT_GNU_STACK RW
+    wbytes(&o, code)
+    pad(&o, 16)
+    wbytes(&o, data)
+    pad(&o, 16)
+    wbytes(&o, sy.b[0:sy.n])
+    wbytes(&o, st.b[0:st.n])
+    wbytes(&o, SHSTR)
+    pad(&o, 8)
+    // section headers: null .text .data .bss .symtab .strtab .shstrtab
+    shdr(&o, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    shdr(&o, 1, 1, 6, code_va(0), HDR, ncode, 0, 0, 16, 0) // PROGBITS AX
+    shdr(&o, 7, 1, 3, dva, doff, nd, 0, 0, 16, 0) // PROGBITS WA
+    shdr(&o, 13, 8, 3, bva, doff + ds, gsize, 0, 0, 16, 0) // NOBITS WA
+    shdr(&o, 18, 2, 0, 0, soff, cast(i64, sy.n), 5, cast(i64, nall - 1), 8, 24) // SYMTAB, first global
+    shdr(&o, 26, 3, 0, 0, stroff, cast(i64, st.n), 0, 0, 1, 0) // STRTAB
+    shdr(&o, 34, 3, 0, 0, shoff_str, cast(i64, SHSTR.len), 0, 0, 1, 0)
+    return o.b[0:o.n]
+}
+
+// syms for code generated by a backend: functions with code (fpos >= 0;
+// names from the IR), the helpers, _start last.
+pub fn fn_syms(a: *mut arena.Arena, names: []ir.Func, nfn: i32, fpos: []i32, fend: []i32, hpos: []i32, hend: []i32): ![]Sym {
+    let mut n = NHELP
+    for i in 0..<nfn {
+        if fpos[i] >= 0 {
+            n += 1
+        }
+    }
+    let mut s = alloc_syms(a, n)!
+    let mut k = 0
+    for i in 0..<nfn {
+        if fpos[i] >= 0 {
+            s[k].name = names[i].name
+            s[k].off = cast(i64, fpos[i])
+            s[k].size = cast(i64, fend[i] - fpos[i])
+            k += 1
+        }
+    }
+    for h in 0..<NHELP {
+        s[k].name = helper_name(h)
+        s[k].off = cast(i64, hpos[h])
+        s[k].size = cast(i64, hend[h] - hpos[h])
+        k += 1
+    }
+    return s
+}

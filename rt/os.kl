@@ -11,7 +11,7 @@ pub const O_WRONLY: i64 = 1
 pub const O_RDWR: i64 = 2
 pub const O_CREAT: i64 = 0o100
 pub const O_TRUNC: i64 = 0o1000
-pub const O_DIRECTORY: i64 = 0o200000 // x86-64 (ARM64: 0o40000)
+pub const O_DIRECTORY: i64 = 0o200000 // x86-64 and RV64 (ARM64: 0o40000)
 pub const SEEK_SET: i64 = 0
 pub const SEEK_END: i64 = 2
 pub const PROT_READ: i64 = 1
@@ -182,14 +182,15 @@ const S_IFDIR: u32 = 0o40000
 const DT_REG: u8 = 8
 
 // st_mode of path (stat, follows symlinks), 0 when it does not exist.
-// x86-64 `struct stat`: 144 bytes, st_mode (u32) at offset 24.
+// `struct stat`: 144 bytes, st_mode (u32) at sys.STAT_MODE (x86-64 24, RV64 16).
 fn mode(path: []u8): u32 {
     let mut st: [144]u8
     let r = sys.call6(sys.NR_NEWFSTATAT, AT_FDCWD, sys.addr_u8(path), sys.addr_u8(st[:]), 0, 0, 0)
     if r != 0 {
         return 0
     }
-    return cast(u32, st[24]) | cast(u32, st[25]) << 8 | cast(u32, st[26]) << 16 | cast(u32, st[27]) << 24
+    let m = sys.STAT_MODE
+    return cast(u32, st[m]) | cast(u32, st[m + 1]) << 8 | cast(u32, st[m + 2]) << 16 | cast(u32, st[m + 3]) << 24
 }
 
 // path: NUL-terminated. A regular file (or a symlink to one).

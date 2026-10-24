@@ -5,6 +5,7 @@
 // and extensions, jumps / calls with rel32 fixups, syscall.
 module x64
 import arena
+import back
 import ir
 
 pub const RAX: i32 = 0
@@ -40,18 +41,6 @@ pub const FX_FN: i32 = 1 // tgt = function index
 pub const FX_DATA: i32 = 2 // tgt = offset in the string data
 pub const FX_BSS: i32 = 3 // tgt = offset in the globals
 pub const FX_HELP: i32 = 4 // tgt = helper (H_*)
-
-// helpers emitted once after the functions
-pub const H_MEMMOVE: i32 = 0
-pub const H_TRAP1: i32 = 1 // division by zero
-pub const H_TRAP2: i32 = 2 // end of a function without `return`
-pub const H_TRAP3: i32 = 3 // null fn value
-pub const H_TRAP4: i32 = 4 // stack overflow (SIGSEGV in the guard)
-pub const H_TRAP5: i32 = 5 // any other SIGSEGV
-pub const H_SEGV: i32 = 6 // the SIGSEGV handler
-pub const H_START: i32 = 7
-pub const NHELP: i32 = 8
-pub const NTRAP: i32 = 6
 
 pub const E_X64: i32 = 1006
 
@@ -96,10 +85,10 @@ pub fn Cg.new(a: *mut arena.Arena, g: *mut ir.Prog): !Cg {
     c.lpos = arena.alloc_i32(a, (*g).labs.len + 1)!
     c.fpos = arena.alloc_i32(a, (*g).nfn + 1)!
     c.fend = arena.alloc_i32(a, (*g).nfn + 1)!
-    c.hpos = arena.alloc_i32(a, NHELP)!
-    c.hend = arena.alloc_i32(a, NHELP)!
-    c.tmsg = arena.alloc_i64(a, NTRAP)!
-    c.tlen = arena.alloc_i32(a, NTRAP)!
+    c.hpos = arena.alloc_i32(a, back.NHELP)!
+    c.hend = arena.alloc_i32(a, back.NHELP)!
+    c.tmsg = arena.alloc_i64(a, back.NTRAP)!
+    c.tlen = arena.alloc_i32(a, back.NTRAP)!
     c.msg = arena.alloc_u8(a, 512)!
     for i in 0..<(*g).nfn + 1 {
         c.fpos[i] = -1

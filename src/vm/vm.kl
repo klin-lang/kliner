@@ -294,7 +294,7 @@ fn syscall(v: *mut Vm, r: i64, base: i32): i64 {
     }
     if x[0] == sys.NR_OPENAT && is_cmdline(x[2]) {
         let name = b"cmdline\0"
-        let fd = sys.call6(319, sys.addr_u8(name), 0, 0, 0, 0, 0)
+        let fd = sys.call6(sys.NR_MEMFD_CREATE, sys.addr_u8(name), 0, 0, 0, 0, 0)
         if fd < 0 {
             return fd
         }

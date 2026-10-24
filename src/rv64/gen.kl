@@ -1,0 +1,673 @@
+// gen.kl: IR -> RV64IM machine code. The same scheme as x64 (C13.4,
+// C15): no register allocation, every IR register is a 64-bit frame slot
+// at fp - 8 (r + 1), the IR's frame slots below them; each instruction
+// loads its operands into a0 / a1, computes, normalizes to its type
+// (C13.2) and stores the result back.
+//
+// Calling convention (Kliner's own, as on x64): the caller reserves 8
+// bytes per argument at sp (rounded up to 16), stores the arguments
+// there and calls (jalr ra); the callee saves ra / fp below them, so
+// argument i is at fp + 16 + 8 i. The result is in a0. sp stays
+// 16-aligned. Registers: a0..a7 temporaries / syscalls, t0 address and
+// immediate temporary, t1 / t2 copy pointers, s1 stack base, s2 the
+// initial sp; nothing is callee-saved except fp and ra.
+module rv64
+import arena
+import back
+import ir
+
+fn fail(c: *mut Cg, what: []u8): i32 {
+    madd(c, (*(*c).g).fns[(*c).fi].name)
+    madd(c, b": ")
+    madd(c, what)
+    return E_RV64
+}
+
+// a0 = a0 <op> a1 for Eq .. Ge (0 / 1).
+fn compare(c: *mut Cg, op: ir.Op, sg: bool) {
+    let mut f3: i64 = 3 // sltu
+    if sg {
+        f3 = 2 // slt
+    }
+    match op {
+        ir.Op.Eq {
+            sub(c, A0, A0, A1)
+            sltiu(c, A0, A0, 1)
+        }
+        ir.Op.Ne {
+            sub(c, A0, A0, A1)
+            alu(c, 0, 3, A0, ZERO, A0) // sltu a0, zero, a0
+        }
+        ir.Op.Lt {
+            alu(c, 0, f3, A0, A0, A1)
+        }
+        ir.Op.Gt {
+            alu(c, 0, f3, A0, A1, A0)
+        }
+        ir.Op.Le {
+            alu(c, 0, f3, A0, A1, A0)
+            xori(c, A0, A0, 1)
+        }
+        else {
+            alu(c, 0, f3, A0, A0, A1)
+            xori(c, A0, A0, 1)
+        }
+    }
+}
+
+// Division / remainder of a0 by a1 at type t. RISC-V does not fault:
+// MIN / -1 = MIN and MIN % -1 = 0 as C13.2 wants; only b == 0 traps.
+fn divrem(c: *mut Cg, rem: bool, t: u8) {
+    bcc_help(c, BEQ, A1, ZERO, back.H_TRAP1)
+    let mut f3: i64 = 4 // div
+    if !ir.is_signed(t) {
+        f3 = 5 // divu
+    }
+    if rem {
+        f3 += 2 // rem / remu
+    }
+    alu(c, 1, f3, A0, A0, A1)
+    norm(c, A0, t)
+}
+
+// Shifts: count a1 (unsigned); >= the width gives 0, or -1 for shr of a
+// negative signed value (C13.2).
+fn shift(c: *mut Cg, left: bool, t: u8) {
+    li(c, T0, ir.tsize(t) * 8)
+    let j1 = br_fwd(c, BLTU, A1, T0)
+    if !left && ir.is_signed(t) {
+        srai(c, A0, A0, 63)
+    } else {
+        li(c, A0, 0)
+    }
+    let j2 = br_fwd(c, BEQ, ZERO, ZERO)
+    here_b(c, j1)
+    if left {
+        alu(c, 0, 1, A0, A0, A1) // sll
+        norm(c, A0, t)
+    } else if ir.is_signed(t) {
+        alu(c, 0x20, 5, A0, A0, A1) // sra (value already sign-extended)
+    } else {
+        alu(c, 0, 5, A0, A0, A1) // srl
+    }
+    here_b(c, j2)
+}
+
+// Stores the argument registers args[base .. base + n) at sp; the bytes
+// reserved.
+fn push_args(c: *mut Cg, base: i32, n: i32): i64 {
+    let g = (*c).g
+    let size = back.roundup(cast(i64, n) * 8, 16)
+    add_sp(c, -size)
+    for j in 0..<n {
+        ldr(c, A0, (*g).args[base + j])
+        sd(c, A0, SP, cast(i64, j) * 8)
+    }
+    return size
+}
+
+const SMALL: i64 = 64
+const NSCR: i32 = 8
+
+fn piece(rest: i64): i64 {
+    if rest >= 8 {
+        return 8
+    }
+    if rest >= 4 {
+        return 4
+    }
+    if rest >= 2 {
+        return 2
+    }
+    return 1
+}
+
+fn npieces(n: i64): i32 {
+    let mut k = 0
+    let mut off: i64 = 0
+    while off < n {
+        off += piece(n - off)
+        k += 1
+    }
+    return k
+}
+
+// [t1] = [t2] for n <= SMALL bytes in at most NSCR pieces (scratch
+// a0 .. a7): every load before the first store, so any overlap gives
+// memmove's result.
+fn copy_small(c: *mut Cg, n: i64) {
+    let mut off: i64 = 0
+    let mut k = 0
+    while off < n {
+        let w = piece(n - off)
+        ld_w(c, w, A0 + k, T2, off)
+        off += w
+        k += 1
+    }
+    off = 0
+    k = 0
+    while off < n {
+        let w = piece(n - off)
+        st_w(c, w, A0 + k, T1, off)
+        off += w
+        k += 1
+    }
+}
+
+// [t1 .. t1 + n) = 0
+fn zero_mem(c: *mut Cg, n: i64) {
+    if n <= SMALL {
+        let mut off: i64 = 0
+        while off < n {
+            let w = piece(n - off)
+            st_w(c, w, ZERO, T1, off)
+            off += w
+        }
+        return
+    }
+    li(c, T0, n)
+    let l8 = (*c).n
+    sltiu(c, T2, T0, 8)
+    let j1 = br_fwd(c, BNE, T2, ZERO)
+    sd(c, ZERO, T1, 0)
+    addi(c, T1, T1, 8)
+    addi(c, T0, T0, -8)
+    br_back(c, BEQ, ZERO, ZERO, l8)
+    here_b(c, j1)
+    let l1 = (*c).n
+    let j2 = br_fwd(c, BEQ, T0, ZERO)
+    st_w(c, 1, ZERO, T1, 0)
+    addi(c, T1, T1, 1)
+    addi(c, T0, T0, -1)
+    br_back(c, BEQ, ZERO, ZERO, l1)
+    here_b(c, j2)
+}
+
+// a0 = a0 + k for a Load / Store displacement k; the remaining offset.
+fn disp(c: *mut Cg, k: i64): i64 {
+    if fits12(k) {
+        return k
+    }
+    li(c, T0, k)
+    add(c, A0, A0, T0)
+    return 0
+}
+
+fn epilogue(c: *mut Cg) {
+    mv(c, SP, FP)
+    ld8(c, RA, SP, 8)
+    ld8(c, FP, SP, 0)
+    addi(c, SP, SP, 16)
+    jalr(c, ZERO, RA, 0)
+}
+
+fn gen_ins(c: *mut Cg, f: ir.Func, slots: i64, at: i32, x: ir.Ins): !i32 {
+    let g = (*c).g
+    room(c, 512 + 48 * x.c)!
+    match x.op {
+        ir.Op.Nop {
+        }
+        ir.Op.Label {
+            (*c).lpos[f.lab + x.a] = (*c).n
+        }
+        ir.Op.Const {
+            li(c, A0, back.cnorm(x.t, x.k))
+            stv(c, x.d, A0)
+        }
+        ir.Op.Slot {
+            addr(c, A0, FP, slots + x.k)
+            stv(c, x.d, A0)
+        }
+        ir.Op.Glob {
+            la(c, A0, FX_BSS, x.k)
+            stv(c, x.d, A0)
+        }
+        ir.Op.Data {
+            la(c, A0, FX_DATA, x.k)
+            stv(c, x.d, A0)
+        }
+        ir.Op.FnRef {
+            if (*g).fns[x.a].kind == 0 {
+                la(c, A0, FX_FN, cast(i64, x.a))
+            } else {
+                li(c, A0, 0)
+            }
+            stv(c, x.d, A0)
+        }
+        ir.Op.Mov {
+            ldr(c, A0, x.a)
+            stv(c, x.d, A0)
+        }
+        ir.Op.Load {
+            ldr(c, A0, x.a)
+            let k = disp(c, x.k)
+            load_t(c, x.t, A0, A0, k)
+            stv(c, x.d, A0)
+        }
+        ir.Op.Store {
+            ldr(c, A0, x.a)
+            let k = disp(c, x.k)
+            ldr(c, A1, x.b)
+            store_t(c, x.t, A1, A0, k)
+        }
+        ir.Op.Add, ir.Op.Sub, ir.Op.Mul, ir.Op.And, ir.Op.Or, ir.Op.Xor {
+            ldr(c, A0, x.a)
+            ldr(c, A1, x.b)
+            match x.op {
+                ir.Op.Add {
+                    add(c, A0, A0, A1)
+                }
+                ir.Op.Sub {
+                    sub(c, A0, A0, A1)
+                }
+                ir.Op.Mul {
+                    alu(c, 1, 0, A0, A0, A1)
+                }
+                ir.Op.And {
+                    alu(c, 0, 7, A0, A0, A1)
+                }
+                ir.Op.Or {
+                    alu(c, 0, 6, A0, A0, A1)
+                }
+                else {
+                    alu(c, 0, 4, A0, A0, A1)
+                }
+            }
+            norm(c, A0, x.t)
+            stv(c, x.d, A0)
+        }
+        ir.Op.Div, ir.Op.Rem {
+            ldr(c, A0, x.a)
+            ldr(c, A1, x.b)
+            divrem(c, x.op == ir.Op.Rem, x.t)
+            stv(c, x.d, A0)
+        }
+        ir.Op.Shl, ir.Op.Shr {
+            ldr(c, A0, x.a)
+            ldr(c, A1, x.b)
+            shift(c, x.op == ir.Op.Shl, x.t)
+            stv(c, x.d, A0)
+        }
+        ir.Op.Eq, ir.Op.Ne, ir.Op.Lt, ir.Op.Le, ir.Op.Gt, ir.Op.Ge {
+            ldr(c, A0, x.a)
+            ldr(c, A1, x.b)
+            compare(c, x.op, ir.is_signed(x.t))
+            stv(c, x.d, A0)
+        }
+        ir.Op.Neg {
+            ldr(c, A0, x.a)
+            sub(c, A0, ZERO, A0)
+            norm(c, A0, x.t)
+            stv(c, x.d, A0)
+        }
+        ir.Op.Not {
+            ldr(c, A0, x.a)
+            xori(c, A0, A0, -1)
+            norm(c, A0, x.t)
+            stv(c, x.d, A0)
+        }
+        ir.Op.Conv {
+            ldr(c, A0, x.a)
+            norm(c, A0, x.t)
+            stv(c, x.d, A0)
+        }
+        ir.Op.Copy {
+            if x.k <= SMALL && npieces(x.k) <= NSCR {
+                ldr(c, T1, x.a)
+                ldr(c, T2, x.b)
+                copy_small(c, x.k)
+            } else {
+                ldr(c, A0, x.a)
+                ldr(c, A1, x.b)
+                li(c, A2, x.k)
+                call_help(c, back.H_MEMMOVE)
+            }
+        }
+        ir.Op.Zero {
+            ldr(c, T1, x.a)
+            zero_mem(c, x.k)
+        }
+        ir.Op.Jmp {
+            if !back.next_is(g, f, at, x.a) {
+                jmp_lab(c, f.lab + x.a)
+            }
+        }
+        ir.Op.Br {
+            ldr(c, A0, x.a)
+            if back.next_is(g, f, at, x.b) {
+                br(c, BNE, A0, ZERO, 8)
+                jmp_lab(c, f.lab + x.c)
+            } else {
+                br(c, BEQ, A0, ZERO, 8)
+                jmp_lab(c, f.lab + x.b)
+                if !back.next_is(g, f, at, x.c) {
+                    jmp_lab(c, f.lab + x.c)
+                }
+            }
+        }
+        ir.Op.Call {
+            if (*g).fns[x.a].kind != 0 {
+                return error(fail(c, b"call of a function without a body"))
+            }
+            let size = push_args(c, x.b, x.c)
+            call_fn(c, x.a)
+            add_sp(c, size)
+            if x.d >= 0 {
+                norm(c, A0, x.t)
+                stv(c, x.d, A0)
+            }
+        }
+        ir.Op.CallInd {
+            let size = push_args(c, x.b, x.c)
+            ldr(c, T1, x.a)
+            bcc_help(c, BEQ, T1, ZERO, back.H_TRAP3)
+            jalr(c, RA, T1, 0)
+            add_sp(c, size)
+            if x.d >= 0 {
+                norm(c, A0, x.t)
+                stv(c, x.d, A0)
+            }
+        }
+        ir.Op.Ret {
+            if x.a >= 0 {
+                ldr(c, A0, x.a)
+            }
+            epilogue(c)
+        }
+        ir.Op.Sys {
+            ldr(c, A7, (*g).args[x.b])
+            for i in 0..<6 {
+                ldr(c, A0 + i, (*g).args[x.b + 1 + i])
+            }
+            ecall(c)
+            if x.d >= 0 {
+                stv(c, x.d, A0)
+            }
+        }
+        ir.Op.Trap {
+            if x.k == 1 {
+                jmp_help(c, back.H_TRAP1)
+            } else if x.k == 3 {
+                jmp_help(c, back.H_TRAP3)
+            } else {
+                jmp_help(c, back.H_TRAP2)
+            }
+        }
+    }
+    return 0
+}
+
+// Frame: fp + 16 .. the arguments, fp + 8 ra, fp + 0 the caller's fp;
+// fp - 8 nr .. fp the IR registers, the IR's slots below.
+fn gen_fn(c: *mut Cg, fi: i32): !i32 {
+    let g = (*c).g
+    let f = (*g).fns[fi]
+    (*c).fi = fi
+    room(c, 128 + 32 * f.np)!
+    (*c).fpos[fi] = (*c).n
+    let rbytes = back.roundup(cast(i64, f.nr) * 8, 16)
+    let total = rbytes + back.roundup(f.frame, 16)
+    if total > 0x7fff0000 {
+        return error(fail(c, b"frame too large"))
+    }
+    addi(c, SP, SP, -16)
+    sd(c, RA, SP, 8)
+    sd(c, FP, SP, 0)
+    mv(c, FP, SP)
+    add_sp(c, -total)
+    for i in 0..<f.np {
+        ld8(c, A0, FP, 16 + 8 * cast(i64, i))
+        stv(c, i, A0)
+    }
+    for j in f.start..<f.end {
+        gen_ins(c, f, -total, j, (*g).ins[j])!
+    }
+    (*c).fend[fi] = (*c).n
+    return 0
+}
+
+// memmove(a0, a1, a2); clobbers a0 .. a2, t0 (a leaf: returns by ra).
+// Forward 8 bytes at a time when both pointers are 8-aligned, else and
+// for the tail byte by byte; backward (dst inside src) byte by byte.
+fn gen_memmove(c: *mut Cg) {
+    let j1 = br_fwd(c, BGEU, A1, A0) // src >= dst: forward
+    add(c, T0, A1, A2)
+    let j2 = br_fwd(c, BGEU, A0, T0) // dst >= src + n: no overlap
+    add(c, A0, A0, A2)
+    add(c, A1, A1, A2)
+    let lb = (*c).n
+    let jb = br_fwd(c, BEQ, A2, ZERO)
+    addi(c, A0, A0, -1)
+    addi(c, A1, A1, -1)
+    ld_w(c, 1, T0, A1, 0)
+    st_w(c, 1, T0, A0, 0)
+    addi(c, A2, A2, -1)
+    br_back(c, BEQ, ZERO, ZERO, lb)
+    here_b(c, jb)
+    jalr(c, ZERO, RA, 0)
+    here_b(c, j1)
+    here_b(c, j2)
+    alu(c, 0, 6, T0, A0, A1) // or
+    andi(c, T0, T0, 7)
+    let ja = br_fwd(c, BNE, T0, ZERO)
+    let l8 = (*c).n
+    sltiu(c, T0, A2, 8)
+    let j8 = br_fwd(c, BNE, T0, ZERO)
+    ld8(c, T0, A1, 0)
+    sd(c, T0, A0, 0)
+    addi(c, A0, A0, 8)
+    addi(c, A1, A1, 8)
+    addi(c, A2, A2, -8)
+    br_back(c, BEQ, ZERO, ZERO, l8)
+    here_b(c, ja)
+    here_b(c, j8)
+    let l1 = (*c).n
+    let je = br_fwd(c, BEQ, A2, ZERO)
+    ld_w(c, 1, T0, A1, 0)
+    st_w(c, 1, T0, A0, 0)
+    addi(c, A0, A0, 1)
+    addi(c, A1, A1, 1)
+    addi(c, A2, A2, -1)
+    br_back(c, BEQ, ZERO, ZERO, l1)
+    here_b(c, je)
+    jalr(c, ZERO, RA, 0)
+}
+
+// the generic Linux syscall numbers (asm-generic/unistd.h)
+const NR_WRITE: i64 = 64
+const NR_EXIT_GROUP: i64 = 94
+const NR_SIGALTSTACK: i64 = 132
+const NR_RT_SIGACTION: i64 = 134
+const NR_MMAP: i64 = 222
+const NR_MPROTECT: i64 = 226
+
+// write(2, message) and exit_group(134), like kliner-run's traps.
+fn gen_trap(c: *mut Cg, k: i32) {
+    la(c, A1, FX_DATA, (*c).tmsg[k])
+    li(c, A2, cast(i64, (*c).tlen[k]))
+    li(c, A0, 2)
+    li(c, A7, NR_WRITE)
+    ecall(c)
+    li(c, A0, 134)
+    li(c, A7, NR_EXIT_GROUP)
+    ecall(c)
+}
+
+const MAP_STACK_FLAGS: i64 = 0x4022 // MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE
+const SA_FLAGS: i64 = 0x08000004 // SA_ONSTACK | SA_SIGINFO (no SA_RESTORER on riscv)
+
+// The SIGSEGV handler (on the alternate stack; never returns): a fault
+// address in [base, base + ALTSTACK + GUARD) of the program stack (base
+// in s1, which generated code never touches) is a stack overflow,
+// anything else an invalid memory access. a1 = siginfo, si_addr at 16.
+fn gen_segv(c: *mut Cg) {
+    ld8(c, A0, A1, 16)
+    sub(c, A0, A0, S1)
+    li(c, T1, back.ALTSTACK + back.GUARD)
+    bcc_help(c, BLTU, A0, T1, back.H_TRAP4)
+    jmp_help(c, back.H_TRAP5)
+}
+
+// _start: argc at [sp], argv at sp + 8. As on x64: a 1 GiB mmap'd stack
+//   [base, +64K) alternate signal stack, [+64K, +1M+64K) PROT_NONE guard,
+// the SIGSEGV handler, $init, main(args) with args = {argv, argc} as a
+// []str, and exit_group with main's i32.
+fn gen_start(c: *mut Cg) {
+    let g = (*c).g
+    mv(c, S2, SP)
+    li(c, S1, 0)
+    li(c, A0, 0)
+    li(c, A1, back.STACK)
+    li(c, A2, 3)
+    li(c, A3, MAP_STACK_FLAGS)
+    li(c, A4, -1)
+    li(c, A5, 0)
+    li(c, A7, NR_MMAP)
+    ecall(c)
+    // mmap failed (negative): stay on the kernel's stack
+    br(c, BGE, A0, ZERO, 8)
+    let j1 = (*c).n
+    w32(c, 0x6f) // jal x0, (patched below)
+    mv(c, S1, A0)
+    addr(c, A0, S1, back.ALTSTACK) // mprotect(base + 64K, 1M, PROT_NONE)
+    li(c, A1, back.GUARD)
+    li(c, A2, 0)
+    li(c, A7, NR_MPROTECT)
+    ecall(c)
+    // sigaltstack(&{base, 0, 64K}, 0)
+    add_sp(c, -32)
+    sd(c, S1, SP, 0)
+    sd(c, ZERO, SP, 8)
+    li(c, A0, back.ALTSTACK)
+    sd(c, A0, SP, 16)
+    mv(c, A0, SP)
+    li(c, A1, 0)
+    li(c, A7, NR_SIGALTSTACK)
+    ecall(c)
+    // rt_sigaction(SIGSEGV, &{handler, flags, mask 0}, 0, 8)
+    la(c, A0, FX_HELP, cast(i64, back.H_SEGV))
+    sd(c, A0, SP, 0)
+    li(c, A0, SA_FLAGS)
+    sd(c, A0, SP, 8)
+    sd(c, ZERO, SP, 16)
+    sd(c, ZERO, SP, 24)
+    li(c, A0, 11)
+    mv(c, A1, SP)
+    li(c, A2, 0)
+    li(c, A3, 8)
+    li(c, A7, NR_RT_SIGACTION)
+    ecall(c)
+    li(c, T0, back.STACK)
+    add(c, SP, S1, T0)
+    or32(c, j1, jenc(cast(i64, (*c).n - j1)))
+    andi(c, SP, SP, -16)
+    if (*g).fns[(*g).init].kind == 0 && (*c).fpos[(*g).init] >= 0 {
+        call_fn(c, (*g).init)
+    }
+    let m = (*g).fns[(*g).main]
+    if m.np == 1 {
+        add_sp(c, -32)
+        addi(c, A0, S2, 8) // argv
+        sd(c, A0, SP, 16)
+        ld8(c, A0, S2, 0) // argc
+        st_w(c, 4, A0, SP, 24)
+        addi(c, A0, SP, 16)
+        sd(c, A0, SP, 0)
+    }
+    call_fn(c, (*g).main)
+    li(c, A7, NR_EXIT_GROUP)
+    ecall(c)
+}
+
+fn trap_msg(c: *mut Cg, k: i32, s: []u8): !i32 {
+    (*c).tmsg[k] = ir.add_data((*c).g, s)!
+    (*c).tlen[k] = s.len
+    return 0
+}
+
+// All reachable functions, then the helpers and _start; fixups of
+// labels, calls and helpers resolved (data / globals: image).
+pub fn gen(c: *mut Cg): !i32 {
+    let g = (*c).g
+    if (*g).main < 0 {
+        madd(c, b"no `main` function")
+        return error(E_RV64)
+    }
+    for k in 1..<back.NTRAP {
+        trap_msg(c, k, back.trap_text(k))!
+    }
+    let live = back.reach((*c).a, g)!
+    for i in 0..<(*g).nfn + 1 {
+        if live[i] != 0 {
+            gen_fn(c, i)!
+        }
+    }
+    room(c, 4096)!
+    (*c).hpos[back.H_MEMMOVE] = (*c).n
+    gen_memmove(c)
+    (*c).hend[back.H_MEMMOVE] = (*c).n
+    for k in 1..<back.NTRAP {
+        (*c).hpos[k] = (*c).n
+        gen_trap(c, k)
+        (*c).hend[k] = (*c).n
+    }
+    (*c).hpos[back.H_SEGV] = (*c).n
+    gen_segv(c)
+    (*c).hend[back.H_SEGV] = (*c).n
+    (*c).hpos[back.H_START] = (*c).n
+    gen_start(c)
+    (*c).hend[back.H_START] = (*c).n
+    for i in 0..<(*c).nf {
+        let x = (*c).fix[i]
+        let mut to = -1
+        if x.kind == FX_LAB {
+            to = (*c).lpos[cast(i32, x.tgt)]
+        } else if x.kind == FX_FN {
+            to = (*c).fpos[cast(i32, x.tgt)]
+        } else if x.kind == FX_HELP {
+            to = (*c).hpos[cast(i32, x.tgt)]
+        } else {
+            continue
+        }
+        if to < 0 {
+            madd(c, b"internal: unresolved code reference")
+            return error(E_RV64)
+        }
+        if !patch(c, x, cast(i64, to - x.pos)) {
+            madd(c, b"jump out of range (function larger than 1 MiB)")
+            return error(E_RV64)
+        }
+    }
+    return 0
+}
+
+// The executable image of a generated program (after gen).
+pub fn image(c: *mut Cg): ![]u8 {
+    let g = (*c).g
+    let code = cast(i64, (*c).n)
+    let dva = back.data_va(code)
+    let bva = back.bss_va(code, cast(i64, (*g).nd))
+    for i in 0..<(*c).nf {
+        let x = (*c).fix[i]
+        let from = back.code_va(cast(i64, x.pos))
+        let mut ok = true
+        if x.kind == FX_DATA {
+            ok = patch(c, x, dva + x.tgt - from)
+        } else if x.kind == FX_BSS {
+            ok = patch(c, x, bva + x.tgt - from)
+        }
+        if !ok {
+            madd(c, b"output too large")
+            return error(E_RV64)
+        }
+    }
+    let syms = back.fn_syms((*c).a, (*g).fns, (*g).nfn + 1, (*c).fpos, (*c).fend, (*c).hpos, (*c).hend)!
+    let img = back.image((*c).a, back.EM_RISCV, 0, (*c).b[0:(*c).n], (*g).data[0:(*g).nd], (*g).gsize, syms, syms.len) or {
+        if err == back.E_BIG {
+            madd(c, b"output too large")
+            return error(E_RV64)
+        }
+        return error(err)
+    }
+    return img
+}

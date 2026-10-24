@@ -1,7 +1,7 @@
 # Kliner — roadmap
 
 Stages in order. Decisions behind them: [00-decisions.md](00-decisions.md).
-Status: **stage 5 — IR (`src/ir/`) and IR interpreter (`src/vm/`) done; checker (`src/check/`, stage 4), parser (`src/parse.kl`, stage 3), lexer (`src/lex.kl`, stage 2) and runtime (`rt/`, stage 1). All built by Klin (main `f9f5471`).**
+Status: **stage 7 — RV64 backend (`src/rv64/`, shared `src/back/`) done; x86-64 backend (`src/x64/`, stage 6), IR and interpreter (stage 5), checker, parser, lexer and runtime (stages 1–4). All built by Klin (`e6058dc`).**
 
 Numbering (**DECIDED 2026-10-24**, [C11.5](02-core-subset.md#c11-stage-3-review--decided-2026-10-24)): the frontend used to be one stage (2: lexer, parser,
 checker). It is now split so that each stage ends in one tested
@@ -9,7 +9,13 @@ piece: 2 lexer, 3 parser, 4 checker; the later stages moved by two
 (IR was 3, now 5; backend 4 → 6; fuller language 5 → 7; self-hosting
 6 → 8; targets 7 → 9; after self-hosting 8 → 10). "Stage N" with a
 space is a roadmap stage; **stage1 / stage2 / stage3** (no space) are
-the bootstrap builds of stage 8.
+the bootstrap builds of stage 9 (self-hosting).
+
+Order (**DECIDED 2026-10-24**, [C15.1](02-core-subset.md#c15-stage-7-rv64-backend--partly-decided-2026-10-24)):
+the RV64 backend comes right after the x86-64 one, before the
+optimizations; the stages after 6 moved by one (fuller language +
+optimizations 7 → 8, self-hosting 8 → 9, more targets 9 → 10, after
+self-hosting 10 → 11).
 
 ---
 
@@ -64,27 +70,41 @@ Proposal: [02-core-subset.md](02-core-subset.md).
 
 - [x] x86-64 instruction encoder — `src/x64/enc.kl` ([06-x86-64.md](06-x86-64.md))
 - [x] Codegen from the IR: locals in stack slots, no register allocator — `src/x64/gen.kl`; small copies / zeroing inline, fall-through jumps dropped
-- [ ] Constant folding, immediates, fused compare + branch — moved to stage 7 (with the register allocator)
-- [x] ELF64 writer (static executable, no libc, no external linker; `.symtab` for objdump / gdb) — `src/x64/elf.kl`, `tools/kliner-build`
+- [ ] Constant folding, immediates, fused compare + branch — moved to stage 8 (with the register allocator)
+- [x] ELF64 writer (static executable, no libc, no external linker; `.symtab` for objdump / gdb) — `src/back/elf.kl` (shared with RV64 since stage 7), `tools/kliner-build`
 - [x] **Milestone: hello world without libc** (`tests/rt/hello`: 18 KB static ELF64, no `PT_INTERP`, no dynamic section)
 - [x] Backend goldens: `tests/ir` (= Klin = kliner-run), `tests/x64` (C13 edges), `tests/rt` hello / alloc / args / cat, traps
 - [x] Kliner's lexer, parser, checker, IR dump, interpreter and `kliner-build` compiled by `kliner-build`: output identical to the Klin-built tools; `kliner-build` rebuilds itself byte for byte
 - [x] Decisions C14 (backend): DECIDED 2026-10-24
 
-## 7. Fuller language
+## 7. RV64 backend (Linux RISC-V 64)
+
+Plan: [07-rv64.md](07-rv64.md). Target board: Orange Pi RV2.
+
+- [x] Shared backend part — `src/back/`: reachable functions, helper / trap list, constant normalization, the static ELF64 writer (x86-64 output unchanged byte for byte)
+- [x] RV64IM encoder — `src/rv64/enc.kl` (no compressed instructions, no floats)
+- [x] Codegen from the same IR — `src/rv64/gen.kl`: locals in stack slots as on x86-64; C13 / C14 kept (wrapping, shifts, traps with exit 134, 1 GiB stack with a guard)
+- [x] `_start`, syscalls from the generic table — `rt/linux_riscv64/sys.kl`; ELF64 `EM_RISCV`
+- [x] `kliner-build --target x64|rv64` (default: the host the compiler was built for)
+- [x] Tests under `qemu-riscv64` (user mode): `tests/ir` goldens, hello / alloc / args / cat, traps; Kliner's lexer, parser, checker, IR dump and interpreter for rv64 = the Klin-built tools
+- [x] **Cross fixpoint:** `kliner-build` for rv64 rebuilds itself under qemu byte for byte, and equals what the x86-64 `kliner-build` makes
+- [ ] Run on a real board (Orange Pi RV2) — instructions in [07-rv64.md](07-rv64.md#test-on-an-orange-pi-rv2), for Marek
+- [ ] Decisions C15: 1 DECIDED (2026-10-24: RV64 before the optimizations); 2–8 PROPOSED
+
+## 8. Fuller language + optimizations
 
 - [ ] Structs
 - [ ] `!T`
 - [ ] `defer`
 - [ ] Slices
 - [ ] Linear scan register allocation
-- [ ] Constant folding, immediate operands, fused compare + branch (from stage 6)
+- [ ] Constant folding, immediate operands, fused compare + branch (from stage 6; on both backends)
 
 (Structs, `!T`, `defer` and slices already go through the IR and the
-x86-64 backend since stages 5–6; what stays open here is the rest of
+x86-64 / RV64 backends since stages 5–7; what stays open here is the rest of
 Klin — floats, `$fn`, interpolation, `pick`, `async`.)
 
-## 8. Self-hosting
+## 9. Self-hosting
 
 - [ ] stage1: Kliner built by current Klin
 - [ ] stage2: built by stage1
@@ -97,14 +117,14 @@ native stage 2 → stage 3, stage 2 == stage 3 byte for byte, checked by
 stage1–stage3 builds above exist for `kliner-build` as well; those
 boxes are left for Marek, since K5 names the compiler `kliner`.)
 
-## 9. More targets
+## 10. More targets
 
-- [ ] Linux ARM64
-- [ ] Linux RV64 (Orange Pi RV2)
+- [ ] Linux ARM64 (same generic syscall table as RV64: `rt/linux_riscv64/sys.kl` is a start)
+- [x] Linux RV64 (Orange Pi RV2) — moved forward to stage 7
 - [ ] Later: macOS (Mach-O, `libSystem`, codesign)
 - [ ] Later: Windows (PE, `kernel32`)
 
-## 10. After self-hosting
+## 11. After self-hosting
 
 - [ ] C interop: manual `extern fn` declarations
 - [ ] C calling conventions: SysV x86-64, AAPCS64, RISC-V psABI

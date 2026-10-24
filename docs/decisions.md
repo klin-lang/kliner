@@ -12,13 +12,13 @@ open is in [Still proposed](#still-proposed) at the end. This file does
 not change its status.
 
 Sources: [00-decisions.md](00-decisions.md) (K1–K11),
-[02-core-subset.md](02-core-subset.md) (C1–C14),
+[02-core-subset.md](02-core-subset.md) (C1–C15),
 [01-roadmap.md](01-roadmap.md), [04-checker.md](04-checker.md),
 [05-ir.md](05-ir.md), [06-x86-64.md](06-x86-64.md).
 Kliner PRs: [#1](https://github.com/klin-lang/kliner/pull/1) to
-[#7](https://github.com/klin-lang/kliner/pull/7).
+[#8](https://github.com/klin-lang/kliner/pull/8).
 
-Total: **40** entries (38 DECIDED, 2 DEFERRED).
+Total: **41** entries (39 DECIDED, 2 DEFERRED).
 
 ---
 
@@ -74,7 +74,7 @@ Sources: [C10](02-core-subset.md#c10-fn-and-string-interpolation--decided-2026-1
 | C11.2 | 2026-10-24 | AST model: `Node {kind, tok, a, b, c, extra}` in tables, with children in `kids: []i32`. The node keeps the `tok` field for its `line:col`. | Positions stay regular, and names are never copied. 24 bytes per node instead of 20 is cheap. | [C11](02-core-subset.md#c11-stage-3-review--decided-2026-10-24), [C2 AST](02-core-subset.md#ast--decided-2026-10-24-c112) |
 | C11.3 | 2026-10-24 | A `fn` without a body in `module sys` (Kliner intrinsics, `rt/linux_x86_64/sys.kl`) stays a documented difference from Klin. | The native runtime needs intrinsics. Klin never compiles that file. | [C11](02-core-subset.md#c11-stage-3-review--decided-2026-10-24) |
 | C11.4 | 2026-10-24 | The `ok = f()!` pattern for an ignored `!T` result, kept while `f()!` was not a statement. Update: since Klin #360 (`f9f5471`), ignored results are plain `f()!` statements (not in `main`). | It followed what Klin accepted at each point. | [C11](02-core-subset.md#c11-stage-3-review--decided-2026-10-24) |
-| C11.5 | 2026-10-24 | Roadmap numbering: 2 lexer, 3 parser, 4 checker, 5 IR, 6 backend, 7 fuller language, 8 self-hosting, 9 targets, 10 after self-hosting. | One stage per frontend part gives reviewable PRs. | [C11](02-core-subset.md#c11-stage-3-review--decided-2026-10-24), [roadmap](01-roadmap.md) |
+| C11.5 | 2026-10-24 | Roadmap numbering: 2 lexer, 3 parser, 4 checker, 5 IR, 6 backend, 7 fuller language, 8 self-hosting, 9 targets, 10 after self-hosting (C15.1 later inserted RV64 as 7 and moved the rest by one). | One stage per frontend part gives reviewable PRs. | [C11](02-core-subset.md#c11-stage-3-review--decided-2026-10-24), [roadmap](01-roadmap.md) |
 
 ## C12 — stage 4 (2026-10-24)
 
@@ -103,17 +103,25 @@ Source: [C14](02-core-subset.md#c14-stage-6-x86-64-backend--decided-2026-10-24),
 
 | ID | Date | Decision | Why | Source |
 |---|---|---|---|---|
-| C14.1 | 2026-10-24 | Kliner uses its own calling convention, not SysV: all arguments on the stack (`[rsp + 8j]`), the result in `rax`, and no callee-saved registers except `rbp`. SysV comes with C interop. | It is the simplest form with no register allocator. Nothing calls C yet (K7). | [C14](02-core-subset.md#c14-stage-6-x86-64-backend--decided-2026-10-24) |
+| C14.1 | 2026-10-24 | Kliner uses its own calling convention, not SysV: all arguments on the stack (`[rsp + 8j]`), the result in `rax`, and no callee-saved registers except `rbp`. SysV comes with C interop (stage 11). | It is the simplest form with no register allocator. Nothing calls C yet (K7). | [C14](02-core-subset.md#c14-stage-6-x86-64-backend--decided-2026-10-24) |
 | C14.2 | 2026-10-24 | `_start` maps a 1 GiB `MAP_NORESERVE` stack with a 1 MiB guard and a `SIGSEGV` handler on an alternate stack. If the `mmap` fails, the program falls back to the kernel stack. | Deep recursion works, and a stack overflow becomes a clear trap instead of a bare SIGSEGV. | [C14](02-core-subset.md#c14-stage-6-x86-64-backend--decided-2026-10-24) |
 | C14.3 | 2026-10-24 | A trap prints `kliner: trap: MESSAGE` on stderr and exits with 134. Integer `MIN / −1` wraps and does not trap. | Same behaviour as `kliner-run`, and the wrapping follows C13.2. | [C14](02-core-subset.md#c14-stage-6-x86-64-backend--decided-2026-10-24) |
 | C14.4 | 2026-10-24 | Only functions reachable from `main` and `$init` are emitted. | hello went from 53 KB to 18 KB. | [C14](02-core-subset.md#c14-stage-6-x86-64-backend--decided-2026-10-24) |
 | C14.5 | 2026-10-24 | Output is a static `ET_EXEC` at `0x400000`, with data at `0x10000000` and a `.symtab`. No PIE and no debug info. | It is the simplest valid executable, and objdump and gdb still show names. | [C14](02-core-subset.md#c14-stage-6-x86-64-backend--decided-2026-10-24) |
 | C14.6 | 2026-10-24 | The tool is `kliner-build FILE.kl -o OUT` (one `kliner` driver later). Backend goldens where Klin's C differs go in `tests/x64`, with `kliner-run` as the reference. | Klin stays the reference wherever it agrees. The directory is empty since Klin `e6058dc`. | [C14](02-core-subset.md#c14-stage-6-x86-64-backend--decided-2026-10-24) |
-| C14.7 | 2026-10-24 | Stage 6 has no register allocator and no folding: every IR value lives in a frame slot. Linear scan, constant folding, immediates and fused compare + branch move to stage 7. | Correctness and the self-compilation fixpoint first. This is the cause of the 2.5–3.8× gap to `gcc -O0`. | [C14](02-core-subset.md#c14-stage-6-x86-64-backend--decided-2026-10-24), [roadmap](01-roadmap.md) |
+| C14.7 | 2026-10-24 | Stage 6 has no register allocator and no folding: every IR value lives in a frame slot. Linear scan, constant folding, immediates and fused compare + branch move to stage 7 (now stage 8, see C15.1). | Correctness and the self-compilation fixpoint first. This is the cause of the 2.5–3.8× gap to `gcc -O0`. | [C14](02-core-subset.md#c14-stage-6-x86-64-backend--decided-2026-10-24), [roadmap](01-roadmap.md) |
 
 Roadmap consequence (2026-10-24): stage 8 "stage2 == stage3, byte
 for byte" is ticked. The `kliner-build` fixpoint was reached in PR #7
-([01-roadmap.md](01-roadmap.md#8-self-hosting)).
+([01-roadmap.md](01-roadmap.md#9-self-hosting); stage 9 since C15.1).
+
+## C15 — stage 7 order (2026-10-24)
+
+Source: [C15](02-core-subset.md#c15-stage-7-rv64-backend--partly-decided-2026-10-24), [roadmap](01-roadmap.md), [07-rv64.md](07-rv64.md). Decided by Marek after merging #8 (`c0c1ef9`).
+
+| ID | Date | Decision | Why | Source |
+|---|---|---|---|---|
+| C15.1 | 2026-10-24 | The next stage (7) is the RV64 backend: Linux RISC-V 64, RV64GC or RV64IM is enough to start. The optimizations (register allocator, folding, immediates, fused compare + branch) come after it, in stage 8 with the fuller language. The later stages move by one: self-hosting 9, more targets 10, after self-hosting 11. | A second target first shows which parts of the backend are tied to x86-64 before the optimizations are built on them. The target board is the Orange Pi RV2. | [C15](02-core-subset.md#c15-stage-7-rv64-backend--partly-decided-2026-10-24), [roadmap](01-roadmap.md#7-rv64-backend-linux-risc-v-64) |
 
 ---
 
@@ -142,3 +150,8 @@ Not decided. The statuses are unchanged here, and Marek decides.
 - **K11:** the exact core-subset feature list, the format of the
   documented Klin ↔ Kliner differences, and macOS / Windows details
   ([K11](00-decisions.md#k11-to-decide-later)).
+- **C15.2–C15.8:** the RV64 backend design: RV64IM only, the C14.1
+  calling convention on RV64, one shared ELF writer, `--target` with
+  the host as default, per-target `sys` constants, qemu tests and the
+  cross fixpoint, alignment in the IR
+  ([C15](02-core-subset.md#c15-stage-7-rv64-backend--partly-decided-2026-10-24)).
