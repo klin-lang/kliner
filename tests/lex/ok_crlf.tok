@@ -1,0 +1,4 @@
+1:1 ident a
+2:1 ident b
+3:2 ident c
+3:3 eof 

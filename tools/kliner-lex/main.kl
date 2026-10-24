@@ -1,0 +1,103 @@
+// kliner-lex FILE: dump the tokens of FILE, one per line:
+//   LINE:COL KIND TEXT
+// KIND is Klin's TokenKind name, TEXT the source text (for string and
+// byteString the value between the quotes, escapes resolved). Bytes
+// outside printable ASCII and `\` are written as \xHH / \\. A lexical
+// error prints `LINE:COL: message` instead and exits 1; an I/O error
+// prints `error: ENOENT` to stderr and exits 2. Same format as
+// tools/klin-lex.dart (Klin's own lexer) — scripts/test.sh diffs them.
+module main
+import arena
+import lex
+import os
+import out
+
+// All state of the tool; no globals (C7.3).
+struct Ctx {
+    a: arena.Arena
+    o: out.Out
+    e: out.Out
+    lx: lex.Lexer
+}
+
+fn put_text(o: *mut out.Out, t: []u8) {
+    let digits = b"0123456789abcdef"
+    for i in 0..<t.len {
+        let c = t[i]
+        if c == '\\' {
+            (*o).lit(b"\\\\")
+        } else if c >= 0x20 && c < 0x7f {
+            (*o).lit(t[i:i + 1])
+        } else {
+            let mut h: [4]u8 = [92, 120, 0, 0]
+            h[2] = digits[cast(i32, c >> 4)]
+            h[3] = digits[cast(i32, c & 15)]
+            (*o).lit(h[:])
+        }
+    }
+}
+
+fn put_pos(c: *mut Ctx, off: i32) {
+    let [line, col] = lex.pos(&(*c).lx, off)
+    (*c).o.dec(cast(i64, line))
+    (*c).o.lit(b":")
+    (*c).o.dec(cast(i64, col))
+}
+
+fn run(c: *mut Ctx): !i32 {
+    (*c).a = arena.Arena.new(1 << 30)!
+    defer arena.free_all(&(*c).a)
+    let args = os.args(&(*c).a)!
+    if args.list.len != 2 {
+        (*c).e.lit(b"usage: kliner-lex FILE")
+        (*c).e.nl()
+        return 2
+    }
+    let src = os.read_file(&(*c).a, args.arg_z(1))!
+    (*c).lx = lex.Lexer.new(src)
+    let n = lex.run(&(*c).lx, &(*c).a) or {
+        if err != lex.E_LEX {
+            return error(err)
+        }
+        -1
+    }
+    if n < 0 {
+        put_pos(c, (*c).lx.err_pos)
+        (*c).o.lit(b": ")
+        (*c).o.lit((*c).lx.err_msg)
+        (*c).o.lit((*c).lx.err_arg)
+        (*c).o.lit((*c).lx.err_tail)
+        (*c).o.nl()
+        return 1
+    }
+    for i in 0..<n {
+        let t = (*c).lx.toks[i]
+        put_pos(c, t.start)
+        (*c).o.lit(b" ")
+        (*c).o.lit(lex.kind_name(t.kind))
+        (*c).o.lit(b" ")
+        if t.kind == lex.Tok.Str || t.kind == lex.Tok.Bytes {
+            let v = lex.str_value(&(*c).lx, &(*c).a, i)!
+            put_text(&(*c).o, v)
+        } else {
+            put_text(&(*c).o, lex.text(&(*c).lx, i))
+        }
+        (*c).o.nl()
+    }
+    return 0
+}
+
+fn main() {
+    let mut c: Ctx
+    c.o = out.Out.stdout()
+    c.e = out.Out.stderr()
+    let code = run(&c) or {
+        c.e.lit(b"error: ")
+        c.e.errno_name(err)
+        c.e.nl()
+        2
+    }
+    c.o.flush_quiet()
+    c.e.flush_quiet()
+    os.exit(code)
+}

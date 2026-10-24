@@ -1,0 +1,12 @@
+2:1 let let
+2:5 ident s
+2:7 equal =
+2:9 string za\xc5\xbc\xc3\xb3\xc5\x82\xc4\x87
+2:18 plus +
+2:20 ident x
+3:1 let let
+3:5 ident t
+3:7 equal =
+3:9 byteString \xc4\x85
+3:14 ident y
+4:1 eof 

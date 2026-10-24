@@ -1,0 +1,10 @@
+// numbers, chars, strings, byte strings, keywords
+fn struct enum const pub module import let mut cast volatile true false if else while for in return break continue defer or error asm match when pick async await
+_ _x x1 X_Y b bx fnx iff b0
+0 7 1_000 0x0 0xFF 0Xab_cd 0b1010 0B1_0 0o755 0O7_7 007
+1.5 1_0.2_5 1e9 1E+3 2e-7 3.25e10 1end 1.x 1..2 1..<2 0x1.5 0b102 0o78 123abc 1e+ 1.e5
+'A' 'z' ' ' '\n' '\t' '\0' '\\' '\'' '"'
+"" "abc" "a\nb\tc\\d\"e\$f\0g" "${x} and $y" "tab	in" "it's" "ł ż ✓"
+b"" b"fn" b"x\n\0\$\\\"" b"ł"
+x // comment to end of line ż ✓
+// last line comment without newline
